@@ -77,124 +77,148 @@ def _all_symbols():
     return sorted(syms)
 
 
+def _process_symbol_data(hist, daily_hist, sym):
+    """Process downloaded data for a single symbol into result dict."""
+    if hist.empty:
+        return {
+            "current": 0, "prev_close": 0, "open": 0,
+            "change_pct": 0, "prices": [], "labels": [],
+            "high": 0, "low": 0,
+        }
+
+    prev_close = None
+    if not daily_hist.empty:
+        if len(daily_hist) >= 2:
+            prev_close = float(daily_hist["Close"].iloc[-2])
+        elif len(daily_hist) == 1:
+            prev_close = float(daily_hist["Open"].iloc[0])
+
+    current_price = float(hist["Close"].iloc[-1])
+    open_price = float(hist["Open"].iloc[0])
+
+    if prev_close and prev_close > 0:
+        change_pct = ((current_price - prev_close) / prev_close) * 100
+    else:
+        change_pct = ((current_price - open_price) / open_price) * 100 if open_price > 0 else 0
+
+    prices = []
+    labels = []
+    for idx, row in hist.iterrows():
+        ts = idx
+        if hasattr(ts, "astimezone"):
+            vienna_ts = ts.astimezone(TZ_VIENNA)
+            labels.append(vienna_ts.strftime("%H:%M"))
+        elif hasattr(ts, "strftime"):
+            labels.append(ts.strftime("%H:%M"))
+        else:
+            labels.append(str(ts))
+        prices.append(round(float(row["Close"]), 2))
+
+    return {
+        "current": round(current_price, 2),
+        "prev_close": round(prev_close, 2) if prev_close else round(open_price, 2),
+        "open": round(open_price, 2),
+        "change_pct": round(change_pct, 2),
+        "prices": prices,
+        "labels": labels,
+        "high": round(float(hist["High"].max()), 2),
+        "low": round(float(hist["Low"].min()), 2),
+    }
+
+
 def _fetch_stock_data():
-    """Fetch intraday data for all unique symbols."""
+    """Fetch intraday data for all symbols using bulk download to avoid rate limiting."""
     symbols = _all_symbols()
+    futures = ["ES=F", "NQ=F"]
+    all_syms = symbols + futures
+    all_syms_str = " ".join(all_syms)
     result = {}
 
+    # Initialize empty results for all symbols
     for sym in symbols:
-        try:
-            ticker = yf.Ticker(sym)
-            hist = ticker.history(period="1d", interval="5m")
-            if hist.empty:
-                hist = ticker.history(period="5d", interval="5m")
-
-            if not hist.empty:
-                info_hist = ticker.history(period="5d", interval="1d")
-                prev_close = None
-                if len(info_hist) >= 2:
-                    prev_close = float(info_hist["Close"].iloc[-2])
-                elif len(info_hist) == 1:
-                    prev_close = float(info_hist["Open"].iloc[0])
-
-                current_price = float(hist["Close"].iloc[-1])
-                open_price = float(hist["Open"].iloc[0])
-
-                if prev_close and prev_close > 0:
-                    change_pct = ((current_price - prev_close) / prev_close) * 100
-                else:
-                    change_pct = ((current_price - open_price) / open_price) * 100 if open_price > 0 else 0
-
-                prices = []
-                labels = []
-                for idx, row in hist.iterrows():
-                    ts = idx
-                    if hasattr(ts, "astimezone"):
-                        vienna_ts = ts.astimezone(TZ_VIENNA)
-                        labels.append(vienna_ts.strftime("%H:%M"))
-                    elif hasattr(ts, "strftime"):
-                        labels.append(ts.strftime("%H:%M"))
-                    else:
-                        labels.append(str(ts))
-                    prices.append(round(float(row["Close"]), 2))
-
-                result[sym] = {
-                    "current": round(current_price, 2),
-                    "prev_close": round(prev_close, 2) if prev_close else round(open_price, 2),
-                    "open": round(open_price, 2),
-                    "change_pct": round(change_pct, 2),
-                    "prices": prices,
-                    "labels": labels,
-                    "high": round(float(hist["High"].max()), 2),
-                    "low": round(float(hist["Low"].min()), 2),
-                }
-            else:
-                result[sym] = {
-                    "current": 0, "prev_close": 0, "open": 0,
-                    "change_pct": 0, "prices": [], "labels": [],
-                    "high": 0, "low": 0,
-                }
-        except Exception as e:
-            print(f"Error fetching {sym}: {e}")
-            result[sym] = {
-                "current": 0, "prev_close": 0, "open": 0,
-                "change_pct": 0, "prices": [], "labels": [],
-                "high": 0, "low": 0, "error": str(e),
-            }
-
-    # Also fetch ES and NQ futures
+        result[sym] = {
+            "current": 0, "prev_close": 0, "open": 0,
+            "change_pct": 0, "prices": [], "labels": [],
+            "high": 0, "low": 0,
+        }
     for fut_sym, fut_name in [("ES=F", "ES Future"), ("NQ=F", "NQ Future")]:
-        try:
-            ticker = yf.Ticker(fut_sym)
-            hist = ticker.history(period="1d", interval="5m")
-            if hist.empty:
-                hist = ticker.history(period="5d", interval="5m")
+        result[fut_sym] = {
+            "name": fut_name, "current": 0, "prev_close": 0,
+            "open": 0, "change_pct": 0, "prices": [], "labels": [],
+            "high": 0, "low": 0,
+        }
 
-            if not hist.empty:
-                info_hist = ticker.history(period="5d", interval="1d")
-                prev_close = None
-                if len(info_hist) >= 2:
-                    prev_close = float(info_hist["Close"].iloc[-2])
+    try:
+        # BULK download: 1 request for intraday data (all symbols at once)
+        print(f"Bulk downloading intraday data for {len(all_syms)} symbols...")
+        intraday = yf.download(all_syms_str, period="5d", interval="5m", group_by="ticker", threads=True)
+        print(f"Intraday download complete. Shape: {intraday.shape}")
 
-                current_price = float(hist["Close"].iloc[-1])
-                open_price = float(hist["Open"].iloc[0])
+        # BULK download: 1 request for daily data (for prev_close)
+        print(f"Bulk downloading daily data...")
+        daily = yf.download(all_syms_str, period="5d", interval="1d", group_by="ticker", threads=True)
+        print(f"Daily download complete. Shape: {daily.shape}")
 
-                if prev_close and prev_close > 0:
-                    change_pct = ((current_price - prev_close) / prev_close) * 100
+        # Process each symbol
+        for sym in all_syms:
+            try:
+                # Extract symbol data from multi-level DataFrame
+                if len(all_syms) == 1:
+                    sym_intraday = intraday
+                    sym_daily = daily
                 else:
-                    change_pct = ((current_price - open_price) / open_price) * 100 if open_price > 0 else 0
-
-                prices = []
-                labels = []
-                for idx, row in hist.iterrows():
-                    ts = idx
-                    if hasattr(ts, "astimezone"):
-                        vienna_ts = ts.astimezone(TZ_VIENNA)
-                        labels.append(vienna_ts.strftime("%H:%M"))
-                    elif hasattr(ts, "strftime"):
-                        labels.append(ts.strftime("%H:%M"))
+                    if sym in intraday.columns.get_level_values(0):
+                        sym_intraday = intraday[sym].dropna(subset=["Close"])
                     else:
-                        labels.append(str(ts))
-                    prices.append(round(float(row["Close"]), 2))
+                        sym_intraday = intraday.xs(sym, level=0, axis=1).dropna(subset=["Close"]) if sym in intraday.columns else None
 
-                result[fut_sym] = {
-                    "name": fut_name,
-                    "current": round(current_price, 2),
-                    "prev_close": round(prev_close, 2) if prev_close else round(open_price, 2),
-                    "open": round(open_price, 2),
-                    "change_pct": round(change_pct, 2),
-                    "prices": prices,
-                    "labels": labels,
-                    "high": round(float(hist["High"].max()), 2),
-                    "low": round(float(hist["Low"].min()), 2),
-                }
-        except Exception as e:
-            print(f"Error fetching {fut_sym}: {e}")
-            result[fut_sym] = {
-                "name": fut_name, "current": 0, "prev_close": 0,
-                "open": 0, "change_pct": 0, "prices": [], "labels": [],
-                "high": 0, "low": 0,
-            }
+                    if sym in daily.columns.get_level_values(0):
+                        sym_daily = daily[sym].dropna(subset=["Close"])
+                    else:
+                        sym_daily = daily.xs(sym, level=0, axis=1).dropna(subset=["Close"]) if sym in daily.columns else None
+
+                if sym_intraday is None or sym_intraday.empty:
+                    print(f"No intraday data for {sym}")
+                    continue
+
+                if sym_daily is None:
+                    sym_daily = sym_intraday  # fallback
+
+                processed = _process_symbol_data(sym_intraday, sym_daily, sym)
+
+                if sym in futures:
+                    fut_name = "ES Future" if sym == "ES=F" else "NQ Future"
+                    processed["name"] = fut_name
+
+                result[sym] = {**result[sym], **processed}
+                print(f"  {sym}: price={processed['current']}, change={processed['change_pct']}%")
+
+            except Exception as e:
+                print(f"Error processing {sym}: {e}")
+
+    except Exception as e:
+        print(f"Error in bulk download: {e}")
+        # Fallback: try individual downloads with delays
+        print("Falling back to individual downloads with delays...")
+        for sym in all_syms:
+            try:
+                time.sleep(1)  # 1 second delay between requests
+                ticker = yf.Ticker(sym)
+                hist = ticker.history(period="5d", interval="5m")
+                time.sleep(0.5)
+                daily_hist = ticker.history(period="5d", interval="1d")
+
+                processed = _process_symbol_data(hist, daily_hist, sym)
+
+                if sym in futures:
+                    fut_name = "ES Future" if sym == "ES=F" else "NQ Future"
+                    processed["name"] = fut_name
+
+                result[sym] = {**result[sym], **processed}
+                print(f"  {sym}: price={processed['current']}, change={processed['change_pct']}%")
+
+            except Exception as e:
+                print(f"Error fetching {sym}: {e}")
 
     return result
 
