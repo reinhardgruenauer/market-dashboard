@@ -5,9 +5,8 @@ News und eine Long/Short-Wahrscheinlichkeit.
 """
 
 from flask import Flask, render_template, jsonify, request
-import yfinance as yf
 import feedparser
-import requests
+import requests as http_requests
 import datetime
 import threading
 import time
@@ -77,64 +76,34 @@ def _all_symbols():
     return sorted(syms)
 
 
-def _process_symbol_data(hist, daily_hist, sym):
-    """Process downloaded data for a single symbol into result dict."""
-    if hist.empty:
-        return {
-            "current": 0, "prev_close": 0, "open": 0,
-            "change_pct": 0, "prices": [], "labels": [],
-            "high": 0, "low": 0,
-        }
-
-    prev_close = None
-    if not daily_hist.empty:
-        if len(daily_hist) >= 2:
-            prev_close = float(daily_hist["Close"].iloc[-2])
-        elif len(daily_hist) == 1:
-            prev_close = float(daily_hist["Open"].iloc[0])
-
-    current_price = float(hist["Close"].iloc[-1])
-    open_price = float(hist["Open"].iloc[0])
-
-    if prev_close and prev_close > 0:
-        change_pct = ((current_price - prev_close) / prev_close) * 100
-    else:
-        change_pct = ((current_price - open_price) / open_price) * 100 if open_price > 0 else 0
-
-    prices = []
-    labels = []
-    for idx, row in hist.iterrows():
-        ts = idx
-        if hasattr(ts, "astimezone"):
-            vienna_ts = ts.astimezone(TZ_VIENNA)
-            labels.append(vienna_ts.strftime("%H:%M"))
-        elif hasattr(ts, "strftime"):
-            labels.append(ts.strftime("%H:%M"))
-        else:
-            labels.append(str(ts))
-        prices.append(round(float(row["Close"]), 2))
-
-    return {
-        "current": round(current_price, 2),
-        "prev_close": round(prev_close, 2) if prev_close else round(open_price, 2),
-        "open": round(open_price, 2),
-        "change_pct": round(change_pct, 2),
-        "prices": prices,
-        "labels": labels,
-        "high": round(float(hist["High"].max()), 2),
-        "low": round(float(hist["Low"].min()), 2),
+def _yahoo_chart_api(symbol, interval="5m", range_str="5d"):
+    """Fetch data directly from Yahoo Finance's chart API (bypasses yfinance rate limits)."""
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
+    params = {
+        "interval": interval,
+        "range": range_str,
+        "includePrePost": "false",
     }
+    headers = {
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept": "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer": "https://finance.yahoo.com/",
+        "Origin": "https://finance.yahoo.com",
+    }
+    resp = http_requests.get(url, params=params, headers=headers, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
 
 
 def _fetch_stock_data():
-    """Fetch intraday data for all symbols using bulk download to avoid rate limiting."""
+    """Fetch intraday data using Yahoo Finance's direct chart API."""
     symbols = _all_symbols()
     futures = ["ES=F", "NQ=F"]
     all_syms = symbols + futures
-    all_syms_str = " ".join(all_syms)
     result = {}
 
-    # Initialize empty results for all symbols
+    # Initialize empty results
     for sym in symbols:
         result[sym] = {
             "current": 0, "prev_close": 0, "open": 0,
@@ -148,77 +117,97 @@ def _fetch_stock_data():
             "high": 0, "low": 0,
         }
 
-    try:
-        # BULK download: 1 request for intraday data (all symbols at once)
-        print(f"Bulk downloading intraday data for {len(all_syms)} symbols...")
-        intraday = yf.download(all_syms_str, period="5d", interval="5m", group_by="ticker", threads=True)
-        print(f"Intraday download complete. Shape: {intraday.shape}")
+    for sym in all_syms:
+        try:
+            data = _yahoo_chart_api(sym, interval="5m", range_str="5d")
+            chart = data.get("chart", {}).get("result", [])
+            if not chart:
+                print(f"No chart data for {sym}")
+                continue
 
-        # BULK download: 1 request for daily data (for prev_close)
-        print(f"Bulk downloading daily data...")
-        daily = yf.download(all_syms_str, period="5d", interval="1d", group_by="ticker", threads=True)
-        print(f"Daily download complete. Shape: {daily.shape}")
+            chart_data = chart[0]
+            meta = chart_data.get("meta", {})
+            timestamps = chart_data.get("timestamp", [])
+            indicators = chart_data.get("indicators", {}).get("quote", [{}])[0]
 
-        # Process each symbol
-        for sym in all_syms:
-            try:
-                # Extract symbol data from multi-level DataFrame
-                if len(all_syms) == 1:
-                    sym_intraday = intraday
-                    sym_daily = daily
-                else:
-                    if sym in intraday.columns.get_level_values(0):
-                        sym_intraday = intraday[sym].dropna(subset=["Close"])
-                    else:
-                        sym_intraday = intraday.xs(sym, level=0, axis=1).dropna(subset=["Close"]) if sym in intraday.columns else None
+            if not timestamps or not indicators.get("close"):
+                print(f"No timestamp/close data for {sym}")
+                continue
 
-                    if sym in daily.columns.get_level_values(0):
-                        sym_daily = daily[sym].dropna(subset=["Close"])
-                    else:
-                        sym_daily = daily.xs(sym, level=0, axis=1).dropna(subset=["Close"]) if sym in daily.columns else None
+            closes = indicators.get("close", [])
+            opens = indicators.get("open", [])
+            highs = indicators.get("high", [])
+            lows = indicators.get("low", [])
 
-                if sym_intraday is None or sym_intraday.empty:
-                    print(f"No intraday data for {sym}")
+            # Get previous close from meta
+            prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
+            current_price = meta.get("regularMarketPrice", 0)
+
+            # Filter to today's trading data for intraday chart
+            today = datetime.date.today()
+            today_prices = []
+            today_labels = []
+            all_valid_closes = []
+
+            for i, ts in enumerate(timestamps):
+                close_val = closes[i] if i < len(closes) else None
+                if close_val is None:
                     continue
+                all_valid_closes.append(close_val)
 
-                if sym_daily is None:
-                    sym_daily = sym_intraday  # fallback
+                dt = datetime.datetime.fromtimestamp(ts, tz=TZ_VIENNA)
+                if dt.date() == today:
+                    today_prices.append(round(close_val, 2))
+                    today_labels.append(dt.strftime("%H:%M"))
 
-                processed = _process_symbol_data(sym_intraday, sym_daily, sym)
+            # If no today data (market not open), use last trading day
+            if not today_prices and timestamps:
+                last_ts = datetime.datetime.fromtimestamp(timestamps[-1], tz=TZ_VIENNA)
+                last_date = last_ts.date()
+                for i, ts in enumerate(timestamps):
+                    close_val = closes[i] if i < len(closes) else None
+                    if close_val is None:
+                        continue
+                    dt = datetime.datetime.fromtimestamp(ts, tz=TZ_VIENNA)
+                    if dt.date() == last_date:
+                        today_prices.append(round(close_val, 2))
+                        today_labels.append(dt.strftime("%H:%M"))
 
-                if sym in futures:
-                    fut_name = "ES Future" if sym == "ES=F" else "NQ Future"
-                    processed["name"] = fut_name
+            if not current_price and all_valid_closes:
+                current_price = all_valid_closes[-1]
 
-                result[sym] = {**result[sym], **processed}
-                print(f"  {sym}: price={processed['current']}, change={processed['change_pct']}%")
+            open_price = today_prices[0] if today_prices else (meta.get("regularMarketOpen", 0) or 0)
 
-            except Exception as e:
-                print(f"Error processing {sym}: {e}")
+            if prev_close and prev_close > 0:
+                change_pct = ((current_price - prev_close) / prev_close) * 100
+            elif open_price and open_price > 0:
+                change_pct = ((current_price - open_price) / open_price) * 100
+            else:
+                change_pct = 0
 
-    except Exception as e:
-        print(f"Error in bulk download: {e}")
-        # Fallback: try individual downloads with delays
-        print("Falling back to individual downloads with delays...")
-        for sym in all_syms:
-            try:
-                time.sleep(1)  # 1 second delay between requests
-                ticker = yf.Ticker(sym)
-                hist = ticker.history(period="5d", interval="5m")
-                time.sleep(0.5)
-                daily_hist = ticker.history(period="5d", interval="1d")
+            processed = {
+                "current": round(current_price, 2),
+                "prev_close": round(prev_close, 2) if prev_close else round(open_price, 2),
+                "open": round(open_price, 2),
+                "change_pct": round(change_pct, 2),
+                "prices": today_prices,
+                "labels": today_labels,
+                "high": round(max([h for h in highs if h is not None] or [0]), 2),
+                "low": round(min([l for l in lows if l is not None and l > 0] or [0]), 2),
+            }
 
-                processed = _process_symbol_data(hist, daily_hist, sym)
+            if sym in futures:
+                fut_name = "ES Future" if sym == "ES=F" else "NQ Future"
+                processed["name"] = fut_name
 
-                if sym in futures:
-                    fut_name = "ES Future" if sym == "ES=F" else "NQ Future"
-                    processed["name"] = fut_name
+            result[sym] = {**result[sym], **processed}
+            print(f"  {sym}: price={processed['current']}, change={processed['change_pct']}%, points={len(today_prices)}")
 
-                result[sym] = {**result[sym], **processed}
-                print(f"  {sym}: price={processed['current']}, change={processed['change_pct']}%")
+            # Small delay between requests to be polite
+            time.sleep(0.3)
 
-            except Exception as e:
-                print(f"Error fetching {sym}: {e}")
+        except Exception as e:
+            print(f"Error fetching {sym}: {e}")
 
     return result
 
@@ -488,7 +477,7 @@ def _fetch_economic_calendar():
             "Accept": "application/json, text/plain, */*",
             "Accept-Language": "en-US,en;q=0.9",
         }
-        resp = requests.get(url, headers=headers, timeout=15)
+        resp = http_requests.get(url, headers=headers, timeout=15)
 
         if resp.status_code == 200:
             raw_data = resp.json()
