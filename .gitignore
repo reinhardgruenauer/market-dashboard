@@ -1,0 +1,4 @@
+__pycache__/
+*.pyc
+.env
+calendar_cache.json.bak

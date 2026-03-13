@@ -1,0 +1,554 @@
+/* ── Global ───────────────────────────────────────── */
+:root {
+    --bg-dark: #0a0e17;
+    --bg-card: #111827;
+    --bg-card-hover: #1a2332;
+    --border: #1e2a3a;
+    --text-primary: #e2e8f0;
+    --text-secondary: #94a3b8;
+    --green: #22c55e;
+    --green-bg: rgba(34, 197, 94, 0.1);
+    --red: #ef4444;
+    --red-bg: rgba(239, 68, 68, 0.1);
+    --blue: #3b82f6;
+    --gold: #f59e0b;
+}
+
+* { margin: 0; padding: 0; box-sizing: border-box; }
+
+body {
+    font-family: 'Inter', 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: var(--bg-dark);
+    color: var(--text-primary);
+    min-height: 100vh;
+}
+
+/* ── Header ──────────────────────────────────────── */
+.header {
+    background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
+    border-bottom: 1px solid var(--border);
+    padding: 20px 40px;
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+}
+
+.header h1 {
+    font-size: 24px;
+    font-weight: 700;
+    background: linear-gradient(135deg, var(--blue), var(--green));
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+}
+
+.header .subtitle {
+    color: var(--text-secondary);
+    font-size: 13px;
+    margin-top: 4px;
+}
+
+.header-right {
+    text-align: right;
+}
+
+.header-right .timestamp {
+    color: var(--text-secondary);
+    font-size: 13px;
+}
+
+.refresh-btn {
+    background: var(--blue);
+    border: none;
+    color: white;
+    padding: 8px 20px;
+    border-radius: 8px;
+    cursor: pointer;
+    font-size: 13px;
+    font-weight: 600;
+    margin-top: 6px;
+    transition: all 0.2s;
+}
+
+.refresh-btn:hover { background: #2563eb; transform: translateY(-1px); }
+.refresh-btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+/* ── Futures Bar ─────────────────────────────────── */
+.futures-bar {
+    display: flex;
+    gap: 20px;
+    padding: 16px 40px;
+    background: #0f1520;
+    border-bottom: 1px solid var(--border);
+}
+
+.future-item {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    padding: 10px 20px;
+    background: var(--bg-card);
+    border-radius: 10px;
+    border: 1px solid var(--border);
+    flex: 1;
+}
+
+.future-item .label {
+    font-weight: 700;
+    font-size: 16px;
+    color: var(--gold);
+}
+
+.future-item .price {
+    font-size: 20px;
+    font-weight: 700;
+}
+
+.future-item .change {
+    font-size: 14px;
+    font-weight: 600;
+    padding: 2px 10px;
+    border-radius: 6px;
+}
+
+.change.positive { color: var(--green); background: var(--green-bg); }
+.change.negative { color: var(--red); background: var(--red-bg); }
+
+/* ── Main Grid ───────────────────────────────────── */
+.main-content {
+    padding: 24px 40px;
+    display: flex;
+    flex-direction: column;
+    gap: 30px;
+}
+
+.index-section {
+    background: var(--bg-card);
+    border-radius: 16px;
+    border: 1px solid var(--border);
+    overflow: hidden;
+}
+
+.section-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 20px 24px;
+    background: linear-gradient(135deg, #111827, #1a2332);
+    border-bottom: 1px solid var(--border);
+}
+
+.section-title {
+    font-size: 20px;
+    font-weight: 700;
+}
+
+.section-title .index-name { color: var(--gold); }
+
+/* ── Probability Circle ──────────────────────────── */
+.probability-container {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.prob-circle {
+    width: 80px;
+    height: 80px;
+    border-radius: 50%;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    font-weight: 800;
+    font-size: 18px;
+    position: relative;
+    box-shadow: 0 0 20px rgba(0,0,0,0.3);
+    transition: all 0.5s;
+}
+
+.prob-circle.long {
+    background: radial-gradient(circle, #166534, #14532d);
+    border: 3px solid var(--green);
+    color: var(--green);
+    box-shadow: 0 0 25px rgba(34, 197, 94, 0.3);
+}
+
+.prob-circle.short {
+    background: radial-gradient(circle, #7f1d1d, #450a0a);
+    border: 3px solid var(--red);
+    color: var(--red);
+    box-shadow: 0 0 25px rgba(239, 68, 68, 0.3);
+}
+
+.prob-circle .pct {
+    font-size: 20px;
+    line-height: 1;
+}
+
+.prob-circle .signal {
+    font-size: 10px;
+    font-weight: 700;
+    letter-spacing: 1px;
+    margin-top: 2px;
+}
+
+.prob-info {
+    font-size: 13px;
+    color: var(--text-secondary);
+    line-height: 1.6;
+}
+
+/* ── Chart & Table Layout ────────────────────────── */
+.section-body {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0;
+}
+
+.chart-panel {
+    padding: 20px;
+    border-right: 1px solid var(--border);
+}
+
+.chart-panel h3 {
+    font-size: 14px;
+    color: var(--text-secondary);
+    margin-bottom: 12px;
+    font-weight: 600;
+}
+
+.chart-container {
+    position: relative;
+    height: 350px;
+}
+
+.stocks-panel {
+    padding: 0;
+    max-height: 430px;
+    overflow-y: auto;
+}
+
+/* ── Stock Table ─────────────────────────────────── */
+.stock-table {
+    width: 100%;
+    border-collapse: collapse;
+}
+
+.stock-table th {
+    position: sticky;
+    top: 0;
+    background: #1a2332;
+    padding: 10px 14px;
+    text-align: left;
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    border-bottom: 1px solid var(--border);
+    z-index: 1;
+}
+
+.stock-table td {
+    padding: 10px 14px;
+    font-size: 13px;
+    border-bottom: 1px solid rgba(30, 42, 58, 0.5);
+}
+
+.stock-table tr:hover { background: var(--bg-card-hover); }
+
+.stock-table .symbol {
+    font-weight: 700;
+    color: var(--blue);
+}
+
+.stock-table .name { color: var(--text-secondary); font-size: 11px; }
+
+.stock-table .price { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+.stock-table .change-cell { font-weight: 600; font-variant-numeric: tabular-nums; }
+
+.stock-table .weight {
+    color: var(--gold);
+    font-weight: 600;
+}
+
+.mini-bar {
+    width: 60px;
+    height: 6px;
+    background: rgba(255,255,255,0.1);
+    border-radius: 3px;
+    overflow: hidden;
+    display: inline-block;
+    vertical-align: middle;
+    margin-left: 6px;
+}
+
+.mini-bar-fill {
+    height: 100%;
+    border-radius: 3px;
+    transition: width 0.5s;
+}
+
+.mini-bar-fill.positive { background: var(--green); }
+.mini-bar-fill.negative { background: var(--red); }
+
+/* ── News Section ────────────────────────────────── */
+.news-section {
+    padding: 20px 24px;
+    border-top: 1px solid var(--border);
+}
+
+.news-section h3 {
+    font-size: 15px;
+    font-weight: 700;
+    margin-bottom: 14px;
+    color: var(--text-primary);
+}
+
+.news-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(320px, 1fr));
+    gap: 12px;
+}
+
+.news-item {
+    background: rgba(255,255,255,0.03);
+    border: 1px solid var(--border);
+    border-radius: 10px;
+    padding: 12px 16px;
+    transition: all 0.2s;
+}
+
+.news-item:hover {
+    background: rgba(255,255,255,0.06);
+    border-color: var(--blue);
+}
+
+.news-item .news-symbol {
+    font-size: 11px;
+    font-weight: 700;
+    color: var(--gold);
+    margin-bottom: 4px;
+}
+
+.news-item a {
+    color: var(--text-primary);
+    text-decoration: none;
+    font-size: 13px;
+    line-height: 1.4;
+    display: block;
+}
+
+.news-item a:hover { color: var(--blue); }
+
+.news-item .news-meta {
+    font-size: 11px;
+    color: var(--text-secondary);
+    margin-top: 6px;
+}
+
+/* ── Loading ─────────────────────────────────────── */
+.loading-overlay {
+    position: fixed;
+    inset: 0;
+    background: rgba(10, 14, 23, 0.9);
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    z-index: 1000;
+    transition: opacity 0.3s;
+}
+
+.loading-overlay.hidden { opacity: 0; pointer-events: none; }
+
+.spinner {
+    width: 50px;
+    height: 50px;
+    border: 4px solid var(--border);
+    border-top-color: var(--blue);
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+}
+
+@keyframes spin { to { transform: rotate(360deg); } }
+
+.loading-text {
+    margin-top: 16px;
+    color: var(--text-secondary);
+    font-size: 14px;
+}
+
+/* ── Scrollbar ───────────────────────────────────── */
+::-webkit-scrollbar { width: 6px; }
+::-webkit-scrollbar-track { background: transparent; }
+::-webkit-scrollbar-thumb { background: var(--border); border-radius: 3px; }
+::-webkit-scrollbar-thumb:hover { background: #2d3b4f; }
+
+/* ── Economic Calendar ────────────────────────────── */
+.calendar-section {
+    background: var(--bg-card);
+    border-radius: 16px;
+    border: 1px solid var(--border);
+    overflow: hidden;
+}
+
+.calendar-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    padding: 18px 24px;
+    background: linear-gradient(135deg, #1a1a2e, #16213e);
+    border-bottom: 1px solid var(--border);
+}
+
+.calendar-title {
+    font-size: 18px;
+    font-weight: 700;
+    color: var(--text-primary);
+    display: flex;
+    align-items: center;
+    gap: 12px;
+}
+
+.calendar-badge {
+    background: linear-gradient(135deg, #dc2626, #b91c1c);
+    color: white;
+    font-size: 11px;
+    font-weight: 700;
+    padding: 3px 10px;
+    border-radius: 20px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+}
+
+.calendar-stars {
+    color: #f59e0b;
+    font-size: 20px;
+    letter-spacing: 2px;
+}
+
+.calendar-table-header {
+    display: grid;
+    grid-template-columns: 80px 120px 1fr 100px 280px;
+    padding: 10px 24px;
+    background: #1a2332;
+    border-bottom: 1px solid var(--border);
+    font-size: 11px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--text-secondary);
+    font-weight: 600;
+}
+
+.calendar-event {
+    display: grid;
+    grid-template-columns: 80px 120px 1fr 100px 280px;
+    padding: 14px 24px;
+    border-bottom: 1px solid rgba(30, 42, 58, 0.5);
+    align-items: center;
+    transition: background 0.2s;
+}
+
+.calendar-event:hover {
+    background: var(--bg-card-hover);
+}
+
+.cal-time {
+    font-size: 15px;
+    font-weight: 700;
+    color: var(--blue);
+    font-variant-numeric: tabular-nums;
+}
+
+.cal-country {
+    font-size: 13px;
+    color: var(--text-primary);
+    font-weight: 500;
+}
+
+.cal-title {
+    font-size: 14px;
+    color: var(--text-primary);
+    font-weight: 600;
+    padding-right: 12px;
+}
+
+.cal-impact {
+    letter-spacing: 2px;
+}
+
+.impact-high {
+    color: #ef4444;
+    font-size: 16px;
+}
+
+.impact-medium {
+    color: #f59e0b;
+    font-size: 16px;
+}
+
+.cal-values {
+    display: flex;
+    gap: 16px;
+}
+
+.cal-val-group {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    min-width: 70px;
+}
+
+.cal-val-label {
+    font-size: 10px;
+    text-transform: uppercase;
+    color: var(--text-secondary);
+    letter-spacing: 0.3px;
+    margin-bottom: 2px;
+}
+
+.cal-val {
+    font-size: 13px;
+    font-weight: 600;
+    color: var(--text-primary);
+    font-variant-numeric: tabular-nums;
+}
+
+.cal-actual {
+    font-size: 13px;
+    font-weight: 700;
+    color: var(--gold);
+    font-variant-numeric: tabular-nums;
+}
+
+.calendar-empty {
+    padding: 24px;
+    text-align: center;
+    color: var(--text-secondary);
+    font-size: 14px;
+}
+
+/* ── Responsive ──────────────────────────────────── */
+@media (max-width: 1200px) {
+    .section-body { grid-template-columns: 1fr; }
+    .chart-panel { border-right: none; border-bottom: 1px solid var(--border); }
+    .main-content { padding: 16px; }
+    .header { padding: 16px 20px; }
+    .futures-bar { padding: 12px 16px; flex-wrap: wrap; }
+    .calendar-table-header,
+    .calendar-event {
+        grid-template-columns: 60px 90px 1fr 80px 220px;
+        padding: 10px 16px;
+        font-size: 12px;
+    }
+}
+
+@media (max-width: 768px) {
+    .calendar-table-header { display: none; }
+    .calendar-event {
+        grid-template-columns: 1fr;
+        gap: 6px;
+    }
+    .cal-values { justify-content: flex-start; }
+}

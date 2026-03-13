@@ -1,0 +1,158 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Market Dashboard — ES & NQ Future Analyse</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap" rel="stylesheet">
+    <link rel="stylesheet" href="/static/css/style.css">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.7/dist/chart.umd.min.js"></script>
+</head>
+<body>
+
+<!-- Loading Overlay -->
+<div class="loading-overlay" id="loading">
+    <div class="spinner"></div>
+    <div class="loading-text">Lade Marktdaten...</div>
+</div>
+
+<!-- Header -->
+<div class="header">
+    <div>
+        <h1>Market Dashboard</h1>
+        <div class="subtitle">ES Future & NQ Future — Tägliche Analyse der Top 10 Unternehmen</div>
+    </div>
+    <div class="header-right">
+        <div class="timestamp" id="timestamp">Lade...</div>
+        <button class="refresh-btn" id="refresh-btn" onclick="manualRefresh()">Aktualisieren (Live)</button>
+    </div>
+</div>
+
+<!-- Futures Bar -->
+<div class="futures-bar">
+    <div class="future-item">
+        <span class="label">ES Future</span>
+        <span class="price" id="es-price">—</span>
+        <span class="change" id="es-change">—</span>
+    </div>
+    <div class="future-item">
+        <span class="label">NQ Future</span>
+        <span class="price" id="nq-price">—</span>
+        <span class="change" id="nq-change">—</span>
+    </div>
+</div>
+
+<!-- ═══════ Wirtschaftskalender ═══════ -->
+<div class="main-content">
+
+    <div class="calendar-section">
+        <div class="calendar-header">
+            <div class="calendar-title">
+                Wirtschaftskalender — Heute
+                <span class="calendar-badge">Hohe Relevanz</span>
+            </div>
+            <div class="calendar-stars">&#9733;&#9733;&#9733;</div>
+        </div>
+        <div class="calendar-table-header">
+            <div class="cal-col-time">Uhrzeit (MEZ)</div>
+            <div class="cal-col-country">Land</div>
+            <div class="cal-col-title">Ereignis</div>
+            <div class="cal-col-impact">Relevanz</div>
+            <div class="cal-col-values">Prognose / Vorher / Aktuell</div>
+        </div>
+        <div id="calendar-events"></div>
+    </div>
+
+    <!-- ═══════ S&P 500 / ES Section ═══════ -->
+    <div class="index-section">
+        <div class="section-header">
+            <div class="section-title">
+                <span class="index-name">S&P 500</span> — ES Future Top 10
+            </div>
+            <div class="probability-container" id="sp500-prob">
+                <div class="prob-circle long">
+                    <span class="pct">—</span>
+                    <span class="signal">—</span>
+                </div>
+                <div class="prob-info">Lade...</div>
+            </div>
+        </div>
+
+        <div class="section-body">
+            <div class="chart-panel">
+                <h3>Intraday Performance — Top 10 (normalisiert %) · Uhrzeit in MEZ</h3>
+                <div class="chart-container">
+                    <canvas id="sp500-chart"></canvas>
+                </div>
+            </div>
+            <div class="stocks-panel">
+                <table class="stock-table" id="sp500-table">
+                    <thead>
+                        <tr>
+                            <th>Aktie</th>
+                            <th>Kurs</th>
+                            <th>Veränderung</th>
+                            <th>Gewicht</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="news-section">
+            <h3>Aktuelle Nachrichten — S&P 500 Top 10</h3>
+            <div class="news-grid" id="sp500-news"></div>
+        </div>
+    </div>
+
+    <!-- ═══════ Nasdaq-100 / NQ Section ═══════ -->
+    <div class="index-section">
+        <div class="section-header">
+            <div class="section-title">
+                <span class="index-name">Nasdaq-100</span> — NQ Future Top 10
+            </div>
+            <div class="probability-container" id="nq100-prob">
+                <div class="prob-circle long">
+                    <span class="pct">—</span>
+                    <span class="signal">—</span>
+                </div>
+                <div class="prob-info">Lade...</div>
+            </div>
+        </div>
+
+        <div class="section-body">
+            <div class="chart-panel">
+                <h3>Intraday Performance — Top 10 (normalisiert %) · Uhrzeit in MEZ</h3>
+                <div class="chart-container">
+                    <canvas id="nq100-chart"></canvas>
+                </div>
+            </div>
+            <div class="stocks-panel">
+                <table class="stock-table" id="nq100-table">
+                    <thead>
+                        <tr>
+                            <th>Aktie</th>
+                            <th>Kurs</th>
+                            <th>Veränderung</th>
+                            <th>Gewicht</th>
+                        </tr>
+                    </thead>
+                    <tbody></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="news-section">
+            <h3>Aktuelle Nachrichten — Nasdaq-100 Top 10</h3>
+            <div class="news-grid" id="nq100-news"></div>
+        </div>
+    </div>
+
+</div>
+
+<script src="/static/js/app.js"></script>
+
+</body>
+</html>
