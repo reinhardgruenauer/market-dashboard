@@ -82,7 +82,7 @@ def _yahoo_chart_api(symbol, interval="5m", range_str="5d"):
     params = {
         "interval": interval,
         "range": range_str,
-        "includePrePost": "false",
+        "includePrePost": "true",
     }
     headers = {
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
@@ -143,11 +143,23 @@ def _fetch_stock_data():
             prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
             current_price = meta.get("regularMarketPrice", 0)
 
-            # Filter to today's trading data for intraday chart
-            today = datetime.date.today()
+            # Filter data for chart display
+            # Futures trade nearly 24h → show all data since last midnight MEZ
+            # Stocks → show pre-market + regular + after-hours (full session)
+            now_vienna = datetime.datetime.now(TZ_VIENNA)
+            today = now_vienna.date()
+            is_future = sym in futures
+
             today_prices = []
             today_labels = []
             all_valid_closes = []
+
+            # For futures: show from midnight MEZ today
+            # For stocks: show from 10:00 MEZ (pre-market start = 4:00 ET ≈ 10:00 MEZ)
+            if is_future:
+                session_start = datetime.datetime.combine(today, datetime.time(0, 0), tzinfo=TZ_VIENNA)
+            else:
+                session_start = datetime.datetime.combine(today, datetime.time(10, 0), tzinfo=TZ_VIENNA)
 
             for i, ts in enumerate(timestamps):
                 close_val = closes[i] if i < len(closes) else None
@@ -156,11 +168,11 @@ def _fetch_stock_data():
                 all_valid_closes.append(close_val)
 
                 dt = datetime.datetime.fromtimestamp(ts, tz=TZ_VIENNA)
-                if dt.date() == today:
+                if dt >= session_start:
                     today_prices.append(round(close_val, 2))
                     today_labels.append(dt.strftime("%H:%M"))
 
-            # If no today data (market not open), use last trading day
+            # If no data for today yet, use last available trading day
             if not today_prices and timestamps:
                 last_ts = datetime.datetime.fromtimestamp(timestamps[-1], tz=TZ_VIENNA)
                 last_date = last_ts.date()
