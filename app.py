@@ -1,5 +1,7 @@
 """
 Market Dashboard - ES Future & NQ Future Daily Analysis
+FIX: Zurück zur v8 chart API (funktioniert auf Render), aber Pre-Market
+     wird jetzt korrekt aus meta.preMarketPrice geholt wenn Candles null sind.
 """
 from flask import Flask, render_template, jsonify, request
 import feedparser
@@ -52,64 +54,27 @@ STOCK_CACHE_SECONDS    = 60
 NEWS_CACHE_SECONDS     = 300
 CALENDAR_CACHE_SECONDS = 3600
 
-HEADERS = {
-    "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
-    "Accept":          "application/json",
-    "Accept-Language": "en-US,en;q=0.9",
-    "Referer":         "https://finance.yahoo.com/",
-    "Origin":          "https://finance.yahoo.com",
-}
-
 def _all_symbols():
     return sorted({s["symbol"] for s in SP500_TOP10 + NQ100_TOP10})
 
-
-# ── Yahoo Finance APIs ────────────────────────────────────────────────
-
-def _yahoo_quote(symbol):
-    """
-    Holt aktuellen Kurs via /v7/finance/quote.
-    Dieser Endpunkt liefert preMarketPrice IMMER korrekt sobald Pre-Market
-    aktiv ist (ab 10:00 MEZ = 04:00 ET) – unabhängig von Chart-Candles.
-    """
-    url = "https://query1.finance.yahoo.com/v7/finance/quote"
+def _yahoo_chart_api(symbol, interval="5m", range_str="5d"):
+    """Originale v8 chart API - nachweislich funktionierend auf Render."""
+    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
     params = {
-        "symbols": symbol,
-        "fields": "regularMarketPrice,preMarketPrice,postMarketPrice,"
-                  "regularMarketPreviousClose,regularMarketOpen,"
-                  "regularMarketDayHigh,regularMarketDayLow",
+        "interval":       interval,
+        "range":          range_str,
+        "includePrePost": "true",
     }
-    r = http_requests.get(url, params=params, headers=HEADERS, timeout=10)
-    r.raise_for_status()
-    results = r.json().get("quoteResponse", {}).get("result", [])
-    return results[0] if results else {}
-
-
-def _yahoo_chart(symbol):
-    """
-    Holt intraday Chart-Daten mit interval=1m, range=1d + includePrePost.
-    1-Minuten-Intervall hat VOR Cash Open deutlich mehr valide Candles
-    als 5-Minuten-Intervall (bei 5m sind fast alle null vor 15:30 MEZ).
-    """
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-    params = {"interval": "1m", "range": "1d", "includePrePost": "true"}
-    r = http_requests.get(url, params=params, headers=HEADERS, timeout=15)
-    r.raise_for_status()
-    chart = r.json().get("chart", {}).get("result", [])
-    return chart[0] if chart else {}
-
-
-def _yahoo_chart_5d(symbol):
-    """Holt 5-Tage Chart (für Wochenend-Fallback)."""
-    url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-    params = {"interval": "5m", "range": "5d", "includePrePost": "false"}
-    r = http_requests.get(url, params=params, headers=HEADERS, timeout=15)
-    r.raise_for_status()
-    chart = r.json().get("chart", {}).get("result", [])
-    return chart[0] if chart else {}
-
-
-# ── Kernfunktion: Aktien & Futures Daten ─────────────────────────────
+    headers = {
+        "User-Agent":      "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
+        "Accept":          "application/json",
+        "Accept-Language": "en-US,en;q=0.9",
+        "Referer":         "https://finance.yahoo.com/",
+        "Origin":          "https://finance.yahoo.com",
+    }
+    resp = http_requests.get(url, params=params, headers=headers, timeout=15)
+    resp.raise_for_status()
+    return resp.json()
 
 def _fetch_stock_data():
     symbols  = _all_symbols()
@@ -126,139 +91,131 @@ def _fetch_stock_data():
 
     now_v   = datetime.datetime.now(TZ_VIENNA)
     today   = now_v.date()
-    weekday = today.weekday()   # 0=Mo … 6=So
-    is_weekend = weekday >= 5
-
-    # Stunde als Dezimalzahl für Sessionerkennung (MEZ)
-    h = now_v.hour + now_v.minute / 60.0
-    # Pre-Market:  10:00–15:30 MEZ  (04:00–09:30 ET)
-    # Regular:     15:30–22:00 MEZ  (09:30–16:00 ET)
-    # Post-Market: 22:00–02:00 MEZ  (16:00–20:00 ET)
-    is_pre    = 10.0 <= h < 15.5
-    is_reg    = 15.5 <= h < 22.0
-    is_post   = h >= 22.0 or h < 2.0
-    is_closed = not (is_pre or is_reg or is_post)  # z.B. 02:00–10:00 MEZ
+    now_ts  = now_v.strftime("%H:%M")
 
     for sym in all_syms:
         try:
             is_future = sym in futures
 
-            # ── 1. Aktuellen Preis via Quote-API holen ─────────────────────
-            # /v7/finance/quote liefert preMarketPrice zuverlässig ab 10:00 MEZ
-            quote = _yahoo_quote(sym)
-            pre_p  = quote.get("preMarketPrice")   or 0
-            reg_p  = quote.get("regularMarketPrice") or 0
-            post_p = quote.get("postMarketPrice")  or 0
-            prev_c = quote.get("regularMarketPreviousClose") or 0
-            open_p = quote.get("regularMarketOpen") or 0
-            high_p = quote.get("regularMarketDayHigh") or 0
-            low_p  = quote.get("regularMarketDayLow")  or 0
+            # ── v8 Chart API mit 5d range (original, funktioniert auf Render) ──
+            data       = _yahoo_chart_api(sym, interval="5m", range_str="5d")
+            chart      = data.get("chart", {}).get("result", [])
+            if not chart:
+                print(f"No chart data for {sym}")
+                continue
 
-            # Aktuellsten Kurs je nach Session wählen
-            if is_pre and pre_p > 0:
-                current_price = pre_p
-                session = "PRE"
-            elif is_reg and reg_p > 0:
-                current_price = reg_p
-                session = "REG"
-            elif is_post and post_p > 0:
-                current_price = post_p
-                session = "POST"
+            chart_data = chart[0]
+            meta       = chart_data.get("meta", {})
+            timestamps = chart_data.get("timestamp", []) or []
+            indicators = chart_data.get("indicators", {}).get("quote", [{}])[0]
+            closes     = indicators.get("close", [])
+            highs      = indicators.get("high",  [])
+            lows       = indicators.get("low",   [])
+
+            # Vorheriger Schlusskurs
+            prev_close = (meta.get("chartPreviousClose") or
+                          meta.get("previousClose") or
+                          meta.get("regularMarketPreviousClose") or 0)
+
+            # ── THE FIX: Aktuellen Preis aus Meta holen ────────────────────
+            # Die meta-Felder werden von Yahoo IMMER befüllt, auch vor Cash Open.
+            # Das ist der einzige zuverlässige Weg vor 15:30 MEZ.
+            pre_p  = meta.get("preMarketPrice")  or 0
+            reg_p  = meta.get("regularMarketPrice") or 0
+            post_p = meta.get("postMarketPrice") or 0
+
+            # Stunde MEZ als float
+            h = now_v.hour + now_v.minute / 60.0
+
+            if 10.0 <= h < 15.5 and pre_p > 0:
+                current_price = pre_p      # Pre-Market: 10:00–15:30 MEZ
+            elif 15.5 <= h < 22.0 and reg_p > 0:
+                current_price = reg_p      # Regular:    15:30–22:00 MEZ
+            elif (h >= 22.0 or h < 2.0) and post_p > 0:
+                current_price = post_p     # Post-Market: 22:00–02:00 MEZ
             elif reg_p > 0:
-                current_price = reg_p
-                session = "REG"
+                current_price = reg_p      # Fallback
             else:
                 current_price = 0
-                session = "—"
+            # ───────────────────────────────────────────────────────────────
 
-            # ── 2. Intraday Chart-Punkte holen ────────────────────────────
-            today_prices = []
-            today_labels = []
+            # ── Chart-Punkte für heutigen Tag sammeln ──────────────────────
+            today_prices     = []
+            today_labels     = []
+            all_valid_closes = []
 
-            if not is_weekend and not is_closed:
-                try:
-                    chart = _yahoo_chart(sym)
-                    timestamps = chart.get("timestamp", []) or []
-                    closes     = chart.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+            # Für Futures: ab Mitternacht MEZ zeigen
+            # Für Stocks: ab 10:00 MEZ (Pre-Market start)
+            if is_future:
+                cutoff = datetime.datetime.combine(today, datetime.time(0, 0), tzinfo=TZ_VIENNA)
+            else:
+                cutoff = datetime.datetime.combine(today, datetime.time(10, 0), tzinfo=TZ_VIENNA)
 
-                    for i, ts in enumerate(timestamps):
-                        cv = closes[i] if i < len(closes) else None
-                        if cv is None:
-                            continue
-                        dt = datetime.datetime.fromtimestamp(ts, tz=TZ_VIENNA)
-                        if dt.date() == today:
-                            today_prices.append(round(cv, 2))
-                            today_labels.append(dt.strftime("%H:%M"))
+            for i, ts in enumerate(timestamps):
+                cv = closes[i] if i < len(closes) else None
+                if cv is None:
+                    continue
+                all_valid_closes.append(cv)
+                dt = datetime.datetime.fromtimestamp(ts, tz=TZ_VIENNA)
+                if dt >= cutoff:
+                    today_prices.append(round(cv, 2))
+                    today_labels.append(dt.strftime("%H:%M"))
 
-                    # Letzten Tick des Charts aktualisieren wenn Quote-Preis neuer
-                    if current_price > 0:
-                        if not today_prices:
-                            # Noch keine Candles → Pre-Market-Preis als Startpunkt
-                            today_prices = [round(current_price, 2)]
-                            today_labels = [now_v.strftime("%H:%M")]
-                        elif today_prices[-1] != round(current_price, 2):
-                            today_prices.append(round(current_price, 2))
-                            today_labels.append(now_v.strftime("%H:%M"))
+            # ── Vor Cash Open: Chart hat noch null-Candles ─────────────────
+            # Wir fügen den aktuellen Pre-Market-Preis als Datenpunkt ein.
+            # So zeigt der Chart "13:xx" statt leer oder "21:00".
+            if not today_prices and current_price > 0:
+                today_prices = [round(current_price, 2)]
+                today_labels = [now_ts]
+                print(f"  {sym}: Pre-Market Preis als Startpunkt eingefügt ({current_price} @ {now_ts})")
 
-                except Exception as ce:
-                    print(f"  {sym} chart error: {ce}")
-                    if current_price > 0:
-                        today_prices = [round(current_price, 2)]
-                        today_labels = [now_v.strftime("%H:%M")]
+            # Aktuellsten Preis ans Ende anfügen wenn er sich geändert hat
+            if today_prices and current_price > 0 and today_prices[-1] != round(current_price, 2):
+                today_prices.append(round(current_price, 2))
+                today_labels.append(now_ts)
 
-            # ── 3. Wochenende / Market Closed → letzten Handelstag zeigen ─
-            if not today_prices:
-                try:
-                    chart5 = _yahoo_chart_5d(sym)
-                    ts5    = chart5.get("timestamp", []) or []
-                    cl5    = chart5.get("indicators", {}).get("quote", [{}])[0].get("close", [])
-                    if ts5:
-                        last_date = datetime.datetime.fromtimestamp(ts5[-1], tz=TZ_VIENNA).date()
-                        for i, ts in enumerate(ts5):
-                            cv = cl5[i] if i < len(cl5) else None
-                            if cv is None: continue
-                            dt = datetime.datetime.fromtimestamp(ts, tz=TZ_VIENNA)
-                            if dt.date() == last_date:
-                                today_prices.append(round(cv, 2))
-                                today_labels.append(dt.strftime("%H:%M"))
-                        high5 = chart5.get("indicators", {}).get("quote", [{}])[0].get("high", [])
-                        low5  = chart5.get("indicators", {}).get("quote", [{}])[0].get("low",  [])
-                        if high5:
-                            high_p = round(max(v for v in high5 if v), 2)
-                        if low5:
-                            low_p  = round(min(v for v in low5  if v and v > 0), 2)
-                        if not current_price and today_prices:
-                            current_price = today_prices[-1]
-                except Exception as fe:
-                    print(f"  {sym} 5d fallback error: {fe}")
+            # ── Wochenende / Feiertag Fallback ────────────────────────────
+            # Wenn kein current_price UND keine Candles → letzten Handelstag zeigen
+            if not today_prices and timestamps:
+                last_ts   = datetime.datetime.fromtimestamp(timestamps[-1], tz=TZ_VIENNA)
+                last_date = last_ts.date()
+                for i, ts in enumerate(timestamps):
+                    cv = closes[i] if i < len(closes) else None
+                    if cv is None: continue
+                    dt = datetime.datetime.fromtimestamp(ts, tz=TZ_VIENNA)
+                    if dt.date() == last_date:
+                        today_prices.append(round(cv, 2))
+                        today_labels.append(dt.strftime("%H:%M"))
+                if today_prices:
+                    current_price = today_prices[-1]
 
-            # ── 4. Change % berechnen ──────────────────────────────────────
-            if prev_c > 0 and current_price > 0:
-                change_pct = (current_price - prev_c) / prev_c * 100
-            elif open_p > 0 and current_price > 0:
-                change_pct = (current_price - open_p) / open_p * 100
+            open_price = today_prices[0] if today_prices else (meta.get("regularMarketOpen") or 0)
+
+            if prev_close > 0 and current_price > 0:
+                change_pct = (current_price - prev_close) / prev_close * 100
+            elif open_price > 0 and current_price > 0:
+                change_pct = (current_price - open_price) / open_price * 100
             else:
                 change_pct = 0
 
             processed = {
                 "current":    round(current_price, 2),
-                "prev_close": round(prev_c, 2),
-                "open":       round(open_p, 2),
+                "prev_close": round(prev_close, 2),
+                "open":       round(open_price, 2),
                 "change_pct": round(change_pct, 2),
                 "prices":     today_prices,
                 "labels":     today_labels,
-                "high":       round(high_p, 2),
-                "low":        round(low_p, 2),
-                "session":    session,
+                "high":       round(max([h for h in highs if h] or [0]), 2),
+                "low":        round(min([l for l in lows  if l and l > 0] or [0]), 2),
             }
             if sym in futures:
                 processed["name"] = "ES Future" if sym == "ES=F" else "NQ Future"
 
             result[sym] = {**result[sym], **processed}
-            print(f"  {sym} [{session}] price={processed['current']} "
-                  f"chg={processed['change_pct']:+.2f}% points={len(today_prices)} "
-                  f"last_label={today_labels[-1] if today_labels else '—'}")
-            time.sleep(0.2)
+            print(f"  {sym}: price={processed['current']} chg={processed['change_pct']:+.2f}% "
+                  f"points={len(today_prices)} first={today_labels[0] if today_labels else '—'} "
+                  f"last={today_labels[-1] if today_labels else '—'}")
+            time.sleep(0.3)
 
         except Exception as e:
             print(f"  ERROR {sym}: {e}")
@@ -290,7 +247,7 @@ def _translate_event_title(title):
     translations = {
         "GDP q/q": "Bruttoinlandsprodukt (BIP) (Quartal)",
         "GDP m/m": "BIP (Monat)", "GDP y/y": "BIP (Jahr)",
-        "Prelim GDP q/q": "Bruttoinlandsprodukt (BIP) (Quartal) P",
+        "Prelim GDP q/q": "BIP (Quartal) Vorabschätzung",
         "Advance GDP q/q": "BIP Erstschätzung (Quartal)",
         "Non-Farm Employment Change": "Beschäftigung außerhalb der Landwirtschaft",
         "Employment Change": "Beschäftigungsänderung",
@@ -340,24 +297,22 @@ def _translate_event_title(title):
     }
     if title in translations:
         return translations[title]
-    title_lower = title.lower()
+    tl = title.lower()
     for en, de in translations.items():
-        if en.lower() == title_lower:
+        if en.lower() == tl:
             return de
     patterns = [
-        ("gdp","BIP"), ("unemployment rate","Arbeitslosenquote"),
+        ("gdp","BIP"),("unemployment rate","Arbeitslosenquote"),
         ("employment change","Beschäftigungsänderung"),
-        ("interest rate","Zinsentscheid"), ("retail sales","Einzelhandelsumsätze"),
-        ("trade balance","Handelsbilanz"), ("inflation rate","Inflationsrate"),
-        ("manufacturing pmi","Einkaufsmanagerindex Produktion"),
+        ("interest rate","Zinsentscheid"),("retail sales","Einzelhandelsumsätze"),
+        ("trade balance","Handelsbilanz"),("manufacturing pmi","Einkaufsmanagerindex Produktion"),
         ("services pmi","Einkaufsmanagerindex Dienstleistung"),
         ("industrial production","Industrieproduktion"),
         ("consumer confidence","Verbrauchervertrauen"),
-        ("housing","Immobilien"), ("building permits","Baugenehmigungen"),
+        ("housing","Immobilien"),("building permits","Baugenehmigungen"),
     ]
-    for pattern, de in patterns:
-        if pattern in title_lower:
-            return de
+    for p, d in patterns:
+        if p in tl: return d
     return title
 
 
@@ -423,8 +378,9 @@ def _parse_ff_events(raw_data):
 def _fetch_economic_calendar():
     try:
         url = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
-        r   = http_requests.get(url, headers={"User-Agent": HEADERS["User-Agent"],
-                                               "Accept": "application/json"}, timeout=15)
+        headers = {"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36",
+                   "Accept": "application/json"}
+        r = http_requests.get(url, headers=headers, timeout=15)
         if r.status_code == 200:
             raw  = r.json()
             evts = _parse_ff_events(raw)
