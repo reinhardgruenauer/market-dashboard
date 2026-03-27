@@ -145,13 +145,21 @@ def _fetch_stock_data():
 
     for sym in all_syms:
         try:
-            data       = _yahoo_chart_api(sym, interval="5m", range_str="5d")
-            chart      = data.get("chart", {}).get("result", [])
-            if not chart:
+            is_future  = sym in futures
+            now_vienna = datetime.datetime.now(TZ_VIENNA)
+            today      = now_vienna.date()
+
+            # ── Schritt 1: Heutiger Chart mit range=1d ────────────────────
+            # range_str="1d" + includePrePost=true liefert ZUVERLÄSSIG den
+            # kompletten heutigen Tag inkl. Pre-Market ab 04:00 ET (10:00 MEZ).
+            # Mit range_str="5d" fehlen Pre-Market-Candles oft komplett.
+            data_1d    = _yahoo_chart_api(sym, interval="5m", range_str="1d")
+            chart_1d   = data_1d.get("chart", {}).get("result", [])
+            if not chart_1d:
                 print(f"No chart data for {sym}")
                 continue
 
-            chart_data = chart[0]
+            chart_data = chart_1d[0]
             meta       = chart_data.get("meta", {})
             timestamps = chart_data.get("timestamp", [])
             indicators = chart_data.get("indicators", {}).get("quote", [{}])[0]
@@ -164,25 +172,20 @@ def _fetch_stock_data():
             highs  = indicators.get("high",  [])
             lows   = indicators.get("low",   [])
 
-            # Vorheriger regulärer Schlusskurs als Referenz für % Change
-            prev_close = meta.get("chartPreviousClose") or meta.get("previousClose")
+            # ── Vorheriger Schlusskurs ─────────────────────────────────────
+            # chartPreviousClose ist in range=1d immer korrekt befüllt
+            prev_close = (
+                meta.get("chartPreviousClose") or
+                meta.get("previousClose") or
+                meta.get("regularMarketPreviousClose")
+            )
 
-            is_future   = sym in futures
-            now_vienna  = datetime.datetime.now(TZ_VIENNA)
-            today       = now_vienna.date()
-
-            # Stocks: Pre-Market beginnt 10:00 MEZ (= 04:00 ET)
-            # Futures: laufen fast 24h – ab Mitternacht zeigen
-            if is_future:
-                session_start = datetime.datetime.combine(
-                    today, datetime.time(0, 0), tzinfo=TZ_VIENNA)
-            else:
-                session_start = datetime.datetime.combine(
-                    today, datetime.time(10, 0), tzinfo=TZ_VIENNA)
-
-            today_prices      = []
-            today_labels      = []
-            all_valid_closes  = []
+            # ── Schritt 2: Alle heutigen Datenpunkte sammeln ──────────────
+            # Für Futures ab Mitternacht MEZ, für Stocks ab 00:00 MEZ
+            # (range=1d enthält ohnehin nur heutige Daten)
+            today_prices     = []
+            today_labels     = []
+            all_valid_closes = []
 
             for i, ts in enumerate(timestamps):
                 close_val = closes[i] if i < len(closes) else None
@@ -190,22 +193,36 @@ def _fetch_stock_data():
                     continue
                 all_valid_closes.append(close_val)
                 dt = datetime.datetime.fromtimestamp(ts, tz=TZ_VIENNA)
-                if dt >= session_start:
+                # Nur Datenpunkte von heute einschließen
+                if dt.date() == today:
                     today_prices.append(round(close_val, 2))
                     today_labels.append(dt.strftime("%H:%M"))
 
-            # Kein heutiger Datenpunkt → letzten verfügbaren Handelstag nutzen
+            # ── Schritt 3: Fallback auf gestern wenn noch keine Daten heute ─
+            # (z.B. Wochenende oder sehr früh morgens vor Pre-Market)
             if not today_prices and timestamps:
-                last_ts   = datetime.datetime.fromtimestamp(timestamps[-1], tz=TZ_VIENNA)
-                last_date = last_ts.date()
-                for i, ts in enumerate(timestamps):
-                    close_val = closes[i] if i < len(closes) else None
-                    if close_val is None:
-                        continue
-                    dt = datetime.datetime.fromtimestamp(ts, tz=TZ_VIENNA)
-                    if dt.date() == last_date:
-                        today_prices.append(round(close_val, 2))
-                        today_labels.append(dt.strftime("%H:%M"))
+                # 5-Tage-Daten holen um gestern zu finden
+                data_5d  = _yahoo_chart_api(sym, interval="5m", range_str="5d")
+                chart_5d = data_5d.get("chart", {}).get("result", [])
+                if chart_5d:
+                    ts_5d  = chart_5d[0].get("timestamp", [])
+                    cl_5d  = chart_5d[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
+                    hi_5d  = chart_5d[0].get("indicators", {}).get("quote", [{}])[0].get("high",  [])
+                    lo_5d  = chart_5d[0].get("indicators", {}).get("quote", [{}])[0].get("low",   [])
+                    if ts_5d:
+                        last_date = datetime.datetime.fromtimestamp(ts_5d[-1], tz=TZ_VIENNA).date()
+                        for i, ts in enumerate(ts_5d):
+                            close_val = cl_5d[i] if i < len(cl_5d) else None
+                            if close_val is None:
+                                continue
+                            dt = datetime.datetime.fromtimestamp(ts, tz=TZ_VIENNA)
+                            if dt.date() == last_date:
+                                today_prices.append(round(close_val, 2))
+                                today_labels.append(dt.strftime("%H:%M"))
+                        highs = hi_5d
+                        lows  = lo_5d
+                        all_valid_closes = [c for c in cl_5d if c is not None]
+                print(f"  {sym}: Kein heutiger Datenpunkt → Vortag wird gezeigt")
 
             # ── BUGFIX: aktuellsten Preis inkl. Pre-Market holen ──────────
             current_price = _get_current_price(meta, all_valid_closes)
