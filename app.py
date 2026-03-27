@@ -148,41 +148,65 @@ def _fetch_stock_data():
             is_future  = sym in futures
             now_vienna = datetime.datetime.now(TZ_VIENNA)
             today      = now_vienna.date()
+            now_ts     = now_vienna.strftime("%H:%M")
 
-            # ── Schritt 1: Heutiger Chart mit range=1d ────────────────────
-            # range_str="1d" + includePrePost=true liefert ZUVERLÄSSIG den
-            # kompletten heutigen Tag inkl. Pre-Market ab 04:00 ET (10:00 MEZ).
-            # Mit range_str="5d" fehlen Pre-Market-Candles oft komplett.
-            data_1d    = _yahoo_chart_api(sym, interval="5m", range_str="1d")
-            chart_1d   = data_1d.get("chart", {}).get("result", [])
-            if not chart_1d:
+            # ── API-Aufruf: range=1d holt heutige Daten inkl. Pre-Market ──
+            data    = _yahoo_chart_api(sym, interval="5m", range_str="1d")
+            chart   = data.get("chart", {}).get("result", [])
+            if not chart:
                 print(f"No chart data for {sym}")
                 continue
 
-            chart_data = chart_1d[0]
+            chart_data = chart[0]
             meta       = chart_data.get("meta", {})
-            timestamps = chart_data.get("timestamp", [])
+            timestamps = chart_data.get("timestamp", []) or []
             indicators = chart_data.get("indicators", {}).get("quote", [{}])[0]
-
-            if not timestamps or not indicators.get("close"):
-                print(f"No timestamp/close data for {sym}")
-                continue
-
-            closes = indicators.get("close", [])
-            highs  = indicators.get("high",  [])
-            lows   = indicators.get("low",   [])
+            closes     = indicators.get("close", [])
+            highs      = indicators.get("high",  [])
+            lows       = indicators.get("low",   [])
 
             # ── Vorheriger Schlusskurs ─────────────────────────────────────
-            # chartPreviousClose ist in range=1d immer korrekt befüllt
             prev_close = (
                 meta.get("chartPreviousClose") or
                 meta.get("previousClose") or
-                meta.get("regularMarketPreviousClose")
+                meta.get("regularMarketPreviousClose") or 0
             )
 
-            # ── Schritt 2: Alle heutigen Datenpunkte sammeln ──────────────
-            # Für Futures ab Mitternacht MEZ, für Stocks ab 00:00 MEZ
-            # (range=1d enthält ohnehin nur heutige Daten)
+            # ── Aktuellen Preis direkt aus Meta-Feldern holen ─────────────
+            # Yahoo befüllt diese Felder SOFORT wenn Pre/Post/Regular aktiv.
+            # Chart-Candle-Closes sind vor Cash Open oft null – Meta nie.
+            hour_mez = now_vienna.hour + now_vienna.minute / 60.0
+
+            # Pre-Market:  10:00–15:30 MEZ (04:00–09:30 ET)
+            # Regular:     15:30–22:00 MEZ (09:30–16:00 ET)
+            # Post-Market: 22:00–02:00 MEZ (16:00–20:00 ET)
+            pre_price  = meta.get("preMarketPrice")
+            reg_price  = meta.get("regularMarketPrice")
+            post_price = meta.get("postMarketPrice")
+
+            if 10.0 <= hour_mez < 15.5 and pre_price and pre_price > 0:
+                # Pre-Market Stunden → preMarketPrice ist aktuell
+                current_price = pre_price
+                session_label = "PRE"
+            elif 15.5 <= hour_mez < 22.0 and reg_price and reg_price > 0:
+                # Regular Session
+                current_price = reg_price
+                session_label = "REG"
+            elif (hour_mez >= 22.0 or hour_mez < 2.0) and post_price and post_price > 0:
+                # Post-Market
+                current_price = post_price
+                session_label = "POST"
+            elif reg_price and reg_price > 0:
+                current_price = reg_price
+                session_label = "REG"
+            else:
+                current_price = 0
+                session_label = "—"
+
+            # ── Chart-Datenpunkte für heutigen Tag sammeln ─────────────────
+            # Yahoo liefert bei range=1d die regulären Candles ab Cash Open.
+            # Vor Cash Open: today_prices ist leer → wir fügen den aktuellen
+            # Pre-Market-Preis als ersten Datenpunkt manuell ein.
             today_prices     = []
             today_labels     = []
             all_valid_closes = []
@@ -193,54 +217,60 @@ def _fetch_stock_data():
                     continue
                 all_valid_closes.append(close_val)
                 dt = datetime.datetime.fromtimestamp(ts, tz=TZ_VIENNA)
-                # Nur Datenpunkte von heute einschließen
                 if dt.date() == today:
                     today_prices.append(round(close_val, 2))
                     today_labels.append(dt.strftime("%H:%M"))
 
-            # ── Schritt 3: Fallback auf gestern wenn noch keine Daten heute ─
-            # (z.B. Wochenende oder sehr früh morgens vor Pre-Market)
-            if not today_prices and timestamps:
-                # 5-Tage-Daten holen um gestern zu finden
+            # Vor Cash Open: nur Pre-Market-Preis als Startpunkt zeigen
+            if not today_prices and current_price > 0:
+                today_prices = [round(current_price, 2)]
+                today_labels = [now_ts]
+
+            # Aktuellsten Preis ans Ende der Chart-Reihe anfügen
+            if current_price > 0:
+                if not today_prices:
+                    today_prices = [round(current_price, 2)]
+                    today_labels = [now_ts]
+                elif today_prices[-1] != round(current_price, 2):
+                    today_prices.append(round(current_price, 2))
+                    today_labels.append(now_ts)
+
+            # ── Fallback Wochenende / kein heutiger Datenpunkt ─────────────
+            if len(today_prices) <= 1 and not (pre_price or reg_price):
                 data_5d  = _yahoo_chart_api(sym, interval="5m", range_str="5d")
                 chart_5d = data_5d.get("chart", {}).get("result", [])
                 if chart_5d:
-                    ts_5d  = chart_5d[0].get("timestamp", [])
-                    cl_5d  = chart_5d[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
-                    hi_5d  = chart_5d[0].get("indicators", {}).get("quote", [{}])[0].get("high",  [])
-                    lo_5d  = chart_5d[0].get("indicators", {}).get("quote", [{}])[0].get("low",   [])
+                    ts_5d = chart_5d[0].get("timestamp", [])
+                    cl_5d = chart_5d[0].get("indicators", {}).get("quote", [{}])[0].get("close", [])
+                    hi_5d = chart_5d[0].get("indicators", {}).get("quote", [{}])[0].get("high",  [])
+                    lo_5d = chart_5d[0].get("indicators", {}).get("quote", [{}])[0].get("low",   [])
                     if ts_5d:
                         last_date = datetime.datetime.fromtimestamp(ts_5d[-1], tz=TZ_VIENNA).date()
+                        fb_prices, fb_labels = [], []
                         for i, ts in enumerate(ts_5d):
-                            close_val = cl_5d[i] if i < len(cl_5d) else None
-                            if close_val is None:
-                                continue
+                            cv = cl_5d[i] if i < len(cl_5d) else None
+                            if cv is None: continue
                             dt = datetime.datetime.fromtimestamp(ts, tz=TZ_VIENNA)
                             if dt.date() == last_date:
-                                today_prices.append(round(close_val, 2))
-                                today_labels.append(dt.strftime("%H:%M"))
-                        highs = hi_5d
-                        lows  = lo_5d
-                        all_valid_closes = [c for c in cl_5d if c is not None]
-                print(f"  {sym}: Kein heutiger Datenpunkt → Vortag wird gezeigt")
-
-            # ── BUGFIX: aktuellsten Preis inkl. Pre-Market holen ──────────
-            current_price = _get_current_price(meta, all_valid_closes)
-            # ─────────────────────────────────────────────────────────────
+                                fb_prices.append(round(cv, 2))
+                                fb_labels.append(dt.strftime("%H:%M"))
+                        if fb_prices:
+                            today_prices = fb_prices
+                            today_labels = fb_labels
+                            highs = hi_5d
+                            lows  = lo_5d
+                            all_valid_closes = [c for c in cl_5d if c is not None]
+                            if not current_price and all_valid_closes:
+                                current_price = all_valid_closes[-1]
 
             open_price = today_prices[0] if today_prices else (meta.get("regularMarketOpen") or 0)
 
-            if prev_close and prev_close > 0:
+            if prev_close and prev_close > 0 and current_price > 0:
                 change_pct = ((current_price - prev_close) / prev_close) * 100
-            elif open_price and open_price > 0:
+            elif open_price and open_price > 0 and current_price > 0:
                 change_pct = ((current_price - open_price) / open_price) * 100
             else:
                 change_pct = 0
-
-            # Aktuellen Preis auch in die Chart-Reihe einfügen wenn neuer als letzter Punkt
-            if today_prices and current_price > 0 and current_price != today_prices[-1]:
-                today_prices.append(round(current_price, 2))
-                today_labels.append(now_vienna.strftime("%H:%M"))
 
             processed = {
                 "current":    round(current_price, 2),
@@ -251,13 +281,15 @@ def _fetch_stock_data():
                 "labels":     today_labels,
                 "high":       round(max([h for h in highs if h is not None] or [0]), 2),
                 "low":        round(min([l for l in lows  if l is not None and l > 0] or [0]), 2),
+                "session":    session_label,
             }
 
             if sym in futures:
                 processed["name"] = "ES Future" if sym == "ES=F" else "NQ Future"
 
             result[sym] = {**result[sym], **processed}
-            print(f"  {sym}: price={processed['current']}, change={processed['change_pct']}%, points={len(today_prices)}")
+            print(f"  {sym} [{session_label}]: price={processed['current']}, "
+                  f"change={processed['change_pct']}%, points={len(today_prices)}")
             time.sleep(0.3)
 
         except Exception as e:
