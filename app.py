@@ -1,10 +1,7 @@
 """
 Market Dashboard - ES Future & NQ Future Daily Analysis
-FINAL FIX: 
-  - Nur v8 chart API (funktioniert auf Render, v7/quote wird geblockt)
-  - prev_close = regularMarketPreviousClose (offizieller Vortags-Schlusskurs)
-  - chartPreviousClose NICHT verwenden (gibt am Montag falsche Werte)
-  - current_price = preMarketPrice/regularMarketPrice aus meta (immer aktuell)
+v5 FIX: prev_close via separatem 1d-Call ohne includePrePost
+        → garantiert offizieller Settlement-Kurs (= Google/Yahoo Referenz)
 """
 from flask import Flask, render_template, jsonify, request
 import feedparser
@@ -19,7 +16,6 @@ from pathlib import Path
 
 TZ_VIENNA = ZoneInfo("Europe/Vienna")
 CALENDAR_CACHE_FILE = Path(__file__).parent / "calendar_cache.json"
-
 app = Flask(__name__)
 
 SP500_TOP10 = [
@@ -34,7 +30,6 @@ SP500_TOP10 = [
     {"symbol": "TSLA",  "name": "Tesla",                "weight": 1.98},
     {"symbol": "BRK-B", "name": "Berkshire Hathaway B", "weight": 1.56},
 ]
-
 NQ100_TOP10 = [
     {"symbol": "NVDA",  "name": "Nvidia",         "weight": 8.90},
     {"symbol": "AAPL",  "name": "Apple",          "weight": 7.35},
@@ -68,13 +63,51 @@ HEADERS = {
 def _all_symbols():
     return sorted({s["symbol"] for s in SP500_TOP10 + NQ100_TOP10})
 
-def _yahoo_chart_api(symbol, interval="5m", range_str="5d"):
-    """v8 chart API — einzige API die auf Render zuverlässig funktioniert."""
+
+def _yahoo_api(symbol, interval, range_str, include_pre_post=True):
+    """Einheitliche Yahoo Finance v8 Chart API."""
     url = f"https://query1.finance.yahoo.com/v8/finance/chart/{symbol}"
-    params = {"interval": interval, "range": range_str, "includePrePost": "true"}
+    params = {
+        "interval":       interval,
+        "range":          range_str,
+        "includePrePost": "true" if include_pre_post else "false",
+    }
     r = http_requests.get(url, params=params, headers=HEADERS, timeout=15)
     r.raise_for_status()
-    return r.json()
+    result = r.json().get("chart", {}).get("result", [])
+    return result[0] if result else {}
+
+
+def _get_official_prev_close(symbol):
+    """
+    Offizieller Vortags-Schlusskurs via 1d-Call OHNE Pre/Post-Market.
+    Das ist exakt der Wert den Google Finance und Yahoo Finance selbst
+    als Referenz für die % Veränderung nutzen.
+    
+    Warum separater Call nötig:
+    Mit includePrePost=true gibt Yahoo manchmal einen pre/post-market-
+    berechneten Wert zurück statt dem echten Börsenschlusskurs.
+    """
+    today = datetime.datetime.now(TZ_VIENNA).date()
+    try:
+        chart = _yahoo_api(symbol, interval="1d", range_str="5d", include_pre_post=False)
+        ts     = chart.get("timestamp", []) or []
+        closes = chart.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+        
+        # Letzter Close der NICHT heute ist → offizieller Settlement
+        for i in range(len(ts) - 1, -1, -1):
+            dt = datetime.datetime.fromtimestamp(ts[i], tz=TZ_VIENNA)
+            cv = closes[i] if i < len(closes) else None
+            if cv and dt.date() < today:
+                return round(cv, 2)
+        
+        # Fallback aus meta
+        meta = chart.get("meta", {})
+        return meta.get("chartPreviousClose") or meta.get("previousClose") or 0
+    except Exception as e:
+        print(f"  prev_close error {symbol}: {e}")
+        return 0
+
 
 def _fetch_stock_data():
     symbols  = _all_symbols()
@@ -89,87 +122,57 @@ def _fetch_stock_data():
         result[fut_sym] = {"name": fut_name, "current": 0, "prev_close": 0, "open": 0,
                            "change_pct": 0, "prices": [], "labels": [], "high": 0, "low": 0}
 
-    now_v   = datetime.datetime.now(TZ_VIENNA)
-    today   = now_v.date()
-    now_ts  = now_v.strftime("%H:%M")
-    h       = now_v.hour + now_v.minute / 60.0
-
-    # Session-Erkennung (MEZ)
-    is_pre  = 10.0 <= h < 15.5   # Pre-Market:  10:00–15:30 MEZ (04:00–09:30 ET)
-    is_reg  = 15.5 <= h < 22.0   # Regular:     15:30–22:00 MEZ (09:30–16:00 ET)
-    is_post = h >= 22.0 or h < 2.0  # Post-Market: 22:00–02:00 MEZ
+    now_v  = datetime.datetime.now(TZ_VIENNA)
+    today  = now_v.date()
+    now_ts = now_v.strftime("%H:%M")
+    h      = now_v.hour + now_v.minute / 60.0
+    is_pre  = 10.0 <= h < 15.5
+    is_reg  = 15.5 <= h < 22.0
+    is_post = h >= 22.0 or h < 2.0
 
     for sym in all_syms:
         try:
             is_future = sym in futures
 
-            # ── Schritt 1: v8 Chart API mit 5d Range ──────────────────────
-            data   = _yahoo_chart_api(sym, interval="5m", range_str="5d")
-            chart  = data.get("chart", {}).get("result", [])
-            if not chart:
-                print(f"  {sym}: No chart data")
-                continue
+            # ── 1. Offiziellen prev_close holen (separater Call ohne PrePost) ──
+            prev_close = _get_official_prev_close(sym)
+            time.sleep(0.15)
 
-            meta       = chart[0].get("meta", {})
-            timestamps = chart[0].get("timestamp", []) or []
-            quote_data = chart[0].get("indicators", {}).get("quote", [{}])[0]
+            # ── 2. Intraday-Daten mit PrePost=true für Chart + current_price ──
+            chart      = _yahoo_api(sym, interval="5m", range_str="5d", include_pre_post=True)
+            meta       = chart.get("meta", {})
+            timestamps = chart.get("timestamp", []) or []
+            quote_data = chart.get("indicators", {}).get("quote", [{}])[0]
             closes     = quote_data.get("close", [])
             highs      = quote_data.get("high",  [])
             lows       = quote_data.get("low",   [])
 
-            # ── Schritt 2: prev_close — NUR regularMarketPreviousClose ─────
-            # WICHTIG: chartPreviousClose NICHT verwenden!
-            # Am Montag gibt chartPreviousClose manchmal Donnerstags-Kurs zurück.
-            # regularMarketPreviousClose = immer offizieller Vortags-Schlusskurs (Freitag).
-            prev_close = meta.get("regularMarketPreviousClose") or 0
-            if not prev_close:
-                # Fallback: letzter Close vom vorletzten Handelstag manuell berechnen
-                dates_seen = {}
-                for i, ts in enumerate(timestamps):
-                    cv = closes[i] if i < len(closes) else None
-                    if cv is None: continue
-                    dt = datetime.datetime.fromtimestamp(ts, tz=TZ_VIENNA)
-                    d  = dt.date()
-                    if d != today:
-                        dates_seen[d] = cv
-                if dates_seen:
-                    last_day = max(dates_seen.keys())
-                    prev_close = dates_seen[last_day]
-
-            # ── Schritt 3: current_price aus Meta-Feldern ──────────────────
-            # Meta-Felder sind immer aktuell — auch vor Cash Open.
+            # ── 3. Aktuellen Preis aus Meta (immer aktuell, auch Pre-Market) ──
             pre_p  = meta.get("preMarketPrice")    or 0
             reg_p  = meta.get("regularMarketPrice") or 0
             post_p = meta.get("postMarketPrice")   or 0
 
             if is_pre and pre_p > 0:
-                current_price = pre_p
-                session = "PRE"
+                current_price = pre_p;  session = "PRE"
             elif is_reg and reg_p > 0:
-                current_price = reg_p
-                session = "REG"
+                current_price = reg_p;  session = "REG"
             elif is_post and post_p > 0:
-                current_price = post_p
-                session = "POST"
+                current_price = post_p; session = "POST"
             elif reg_p > 0:
-                current_price = reg_p
-                session = "REG"
+                current_price = reg_p;  session = "REG"
             elif pre_p > 0:
-                current_price = pre_p
-                session = "PRE"
+                current_price = pre_p;  session = "PRE"
             else:
-                current_price = 0
-                session = "—"
+                current_price = 0;      session = "—"
 
-            # ── Schritt 4: Chart-Punkte für heutigen Tag ───────────────────
-            if is_future:
-                cutoff = datetime.datetime.combine(today, datetime.time(0, 0), tzinfo=TZ_VIENNA)
-            else:
-                cutoff = datetime.datetime.combine(today, datetime.time(10, 0), tzinfo=TZ_VIENNA)
+            # ── 4. Chart-Punkte für heute ──────────────────────────────────
+            cutoff = datetime.datetime.combine(
+                today,
+                datetime.time(0, 0) if is_future else datetime.time(10, 0),
+                tzinfo=TZ_VIENNA
+            )
 
-            today_prices     = []
-            today_labels     = []
-
+            today_prices, today_labels = [], []
             for i, ts in enumerate(timestamps):
                 cv = closes[i] if i < len(closes) else None
                 if cv is None: continue
@@ -178,12 +181,12 @@ def _fetch_stock_data():
                     today_prices.append(round(cv, 2))
                     today_labels.append(dt.strftime("%H:%M"))
 
-            # Wenn noch keine Candles (vor Cash Open) → aktuellen Preis als Startpunkt
+            # Vor Cash Open: aktuellen Preis als Startpunkt einfügen
             if not today_prices and current_price > 0:
                 today_prices = [round(current_price, 2)]
                 today_labels = [now_ts]
 
-            # Aktuellsten Preis ans Ende anfügen
+            # Aktuellsten Preis ans Ende
             if current_price > 0:
                 if not today_prices:
                     today_prices = [round(current_price, 2)]
@@ -194,21 +197,19 @@ def _fetch_stock_data():
 
             # Wochenend-Fallback
             if not today_prices and timestamps:
-                last_ts   = datetime.datetime.fromtimestamp(timestamps[-1], tz=TZ_VIENNA)
-                last_date = last_ts.date()
+                last_date = datetime.datetime.fromtimestamp(timestamps[-1], tz=TZ_VIENNA).date()
                 for i, ts in enumerate(timestamps):
                     cv = closes[i] if i < len(closes) else None
                     if cv is None: continue
-                    dt = datetime.datetime.fromtimestamp(ts, tz=TZ_VIENNA)
-                    if dt.date() == last_date:
+                    if datetime.datetime.fromtimestamp(ts, tz=TZ_VIENNA).date() == last_date:
                         today_prices.append(round(cv, 2))
-                        today_labels.append(dt.strftime("%H:%M"))
+                        today_labels.append(datetime.datetime.fromtimestamp(ts, tz=TZ_VIENNA).strftime("%H:%M"))
                 if today_prices and not current_price:
                     current_price = today_prices[-1]
 
             open_price = today_prices[0] if today_prices else (meta.get("regularMarketOpen") or 0)
 
-            # ── Schritt 5: change_pct berechnen ───────────────────────────
+            # ── 5. % Change mit offiziellem prev_close ─────────────────────
             if prev_close > 0 and current_price > 0:
                 change_pct = (current_price - prev_close) / prev_close * 100
             elif open_price > 0 and current_price > 0:
@@ -224,18 +225,17 @@ def _fetch_stock_data():
                 "prices":     today_prices,
                 "labels":     today_labels,
                 "high":       round(max([v for v in highs if v] or [0]), 2),
-                "low":        round(min([v for v in lows  if v and v > 0] or [0]), 2),
+                "low":        round(min([v for v in lows if v and v > 0] or [0]), 2),
                 "session":    session,
             }
             if sym in futures:
                 processed["name"] = "ES Future" if sym == "ES=F" else "NQ Future"
 
             result[sym] = {**result[sym], **processed}
-            print(f"  {sym} [{session}]: {current_price} | prev={prev_close} | "
+            print(f"  {sym} [{session}]: {current_price:.2f} | prev={prev_close:.2f} | "
                   f"chg={change_pct:+.2f}% | pts={len(today_prices)} | "
-                  f"first={today_labels[0] if today_labels else '—'} "
-                  f"last={today_labels[-1] if today_labels else '—'}")
-            time.sleep(0.3)
+                  f"labels={today_labels[0] if today_labels else '—'}..{today_labels[-1] if today_labels else '—'}")
+            time.sleep(0.2)
 
         except Exception as e:
             print(f"  ERROR {sym}: {e}")
@@ -334,7 +334,6 @@ def _save_calendar_to_file(raw, events):
     except Exception as e:
         print(f"  Calendar save error: {e}")
 
-
 def _load_calendar_from_file():
     try:
         if CALENDAR_CACHE_FILE.exists():
@@ -345,7 +344,6 @@ def _load_calendar_from_file():
     except Exception as e:
         print(f"  Calendar load error: {e}")
     return None
-
 
 def _parse_ff_events(raw):
     events = []
@@ -376,45 +374,51 @@ def _parse_ff_events(raw):
     events.sort(key=lambda x: x.get("time","99:99"))
     return events
 
-
 def _fetch_economic_calendar():
     try:
         r = http_requests.get("https://nfs.faireconomy.media/ff_calendar_thisweek.json",
                               headers={"User-Agent": HEADERS["User-Agent"],
                                        "Accept": "application/json"}, timeout=15)
         if r.status_code == 200:
-            raw = r.json()
-            evts = _parse_ff_events(raw)
-            _save_calendar_to_file(raw, evts)
-            return evts
+            raw = r.json(); evts = _parse_ff_events(raw)
+            _save_calendar_to_file(raw, evts); return evts
     except Exception as e:
         print(f"  Calendar fetch error: {e}")
     cached = _load_calendar_from_file()
     return cached if cached is not None else []
 
-
-def _get_cached(key, fetch_fn, ttl, force=False):
+def get_stock_data(force=False):
     now = time.time()
     with _cache_lock:
-        if not force and _cache[key] and _cache[f"last_{key.replace('_data','')}_update"] and \
-                now - _cache[f"last_{key.replace('_data','')}_update"] < ttl:
-            return _cache[key]
-    data = fetch_fn()
+        if not force and _cache["stock_data"] and _cache["last_stock_update"] and \
+                now - _cache["last_stock_update"] < STOCK_CACHE_SECONDS:
+            return _cache["stock_data"]
+    data = _fetch_stock_data()
     with _cache_lock:
-        _cache[key] = data
-        _cache[f"last_{key.replace('_data','')}_update"] = time.time()
+        _cache["stock_data"] = data; _cache["last_stock_update"] = time.time()
     return data
 
-
-def get_stock_data(force=False):
-    return _get_cached("stock_data", _fetch_stock_data, STOCK_CACHE_SECONDS, force)
-
 def get_news_data(force=False):
-    return _get_cached("news_data", _fetch_news, NEWS_CACHE_SECONDS, force)
+    now = time.time()
+    with _cache_lock:
+        if not force and _cache["news_data"] and _cache["last_news_update"] and \
+                now - _cache["last_news_update"] < NEWS_CACHE_SECONDS:
+            return _cache["news_data"]
+    data = _fetch_news()
+    with _cache_lock:
+        _cache["news_data"] = data; _cache["last_news_update"] = time.time()
+    return data
 
 def get_calendar_data(force=False):
-    return _get_cached("calendar_data", _fetch_economic_calendar, CALENDAR_CACHE_SECONDS, force)
-
+    now = time.time()
+    with _cache_lock:
+        if not force and _cache["calendar_data"] and _cache["last_calendar_update"] and \
+                now - _cache["last_calendar_update"] < CALENDAR_CACHE_SECONDS:
+            return _cache["calendar_data"]
+    data = _fetch_economic_calendar()
+    with _cache_lock:
+        _cache["calendar_data"] = data; _cache["last_calendar_update"] = time.time()
+    return data
 
 def _calc_probability(top10, stock_data):
     tw = 0; twu = 0; up = 0
@@ -427,22 +431,18 @@ def _calc_probability(top10, stock_data):
             "up_count":up,"down_count":10-up,
             "signal":"LONG" if prob>50 else "SHORT" if prob<50 else "NEUTRAL"}
 
-
 @app.route("/")
 def index():
     return render_template("index.html")
 
-
 @app.route("/api/data")
 def api_data():
     force = request.args.get("force","false").lower() == "true"
-    sd    = get_stock_data(force=force)
-    nd    = get_news_data(force=force)
-    cd    = get_calendar_data(force=force)
-
+    sd = get_stock_data(force=force)
+    nd = get_news_data(force=force)
+    cd = get_calendar_data(force=force)
     sp500 = [{**s, **sd.get(s["symbol"],{}), "news": nd.get(s["symbol"],[])} for s in SP500_TOP10]
     nq100 = [{**s, **sd.get(s["symbol"],{}), "news": nd.get(s["symbol"],[])} for s in NQ100_TOP10]
-
     return jsonify({
         "timestamp": datetime.datetime.now(TZ_VIENNA).strftime("%Y-%m-%d %H:%M:%S") + " MEZ",
         "futures":  {"ES": sd.get("ES=F",{}), "NQ": sd.get("NQ=F",{})},
@@ -451,13 +451,11 @@ def api_data():
         "calendar": cd,
     })
 
-
 @app.after_request
 def add_headers(response):
     response.headers["X-Frame-Options"]         = "ALLOW-FROM https://www.rg-trading.at"
     response.headers["Content-Security-Policy"] = "frame-ancestors 'self' https://www.rg-trading.at https://rg-trading.at"
     return response
-
 
 if __name__ == "__main__":
     port  = int(os.environ.get("PORT", 5000))
