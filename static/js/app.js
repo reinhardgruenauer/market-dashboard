@@ -14,7 +14,8 @@ const PHASE = {
   PRE:    ['Vorbörse', ''],
   REG:    ['US-Handel läuft', 'reg'],
   POST:   ['Nachbörse', ''],
-  CLOSED: ['Börse geschlossen', ''],
+  EU:     ['Europa-Session · Futures live', ''],
+  CLOSED: ['Wochenende', ''],
 };
 
 const $ = id => document.getElementById(id);
@@ -100,6 +101,12 @@ function render() {
   const [phTxt, phCls] = PHASE[DATA.phase] || ['–', ''];
   const b = $('phaseBadge'); b.textContent = '● ' + phTxt; b.className = 'badge ' + phCls;
   $('stamp').textContent = DATA.timestamp || '';
+  const lastMode = DATA.phase === 'EU' || DATA.phase === 'CLOSED';
+  const ib = $('infobar');
+  ib.hidden = !lastMode;
+  ib.innerHTML = DATA.phase === 'CLOSED'
+    ? '<b>Wochenende:</b> Kacheln und Tachos zeigen die letzte US-Sitzung (inkl. Nachbörse) im Vergleich zum Schluss davor.'
+    : '<b>Europa-Session:</b> US-Aktien handeln erst ab ca. 10:00 MEZ (vorbörslich). Bis dahin zeigen Kacheln und Tachos die <b>letzte US-Sitzung inkl. Nachbörse</b>. NQ &amp; ES Futures sind live.';
 
   // Tachos
   [['NQ', 'nq100'], ['ES', 'sp500']].forEach(([k, key]) => {
@@ -109,7 +116,7 @@ function render() {
     $('v' + k).textContent = (bar.score > 0 ? '+' : '') + bar.score; $('v' + k).className = 'gauge-val mono ' + c;
     $('l' + k).textContent = bar.label; $('l' + k).className = 'gauge-lab ' + c;
     $(k.toLowerCase() + 'Wsum').textContent = 'Top 10 ≈ ' + fmt(bar.weight_sum, 0) + ' % Indexgewicht';
-    $('s' + k).innerHTML = `Gewichtete Veränderung der Top 10: <b class="${cls(bar.weighted_change)}">${sgn(bar.weighted_change)} %</b>`;
+    $('s' + k).innerHTML = `${lastMode ? 'Letzte US-Sitzung' : 'Gewichtete Veränderung'} der Top 10: <b class="${cls(bar.weighted_change)}">${sgn(bar.weighted_change)} %</b>`;
   });
   $('cardNQ').classList.toggle('focus', market === 'nq');
   $('cardES').classList.toggle('focus', market === 'es');
@@ -127,7 +134,7 @@ function render() {
   const M_ = MK[market], sec = DATA[M_.key], bar = sec.barometer;
   const n = bar.count || 10;
   $('bUp').textContent = `${bar.up_count} von ${n}`; $('bUpBar').style.width = (bar.up_count / n * 100) + '%';
-  $('refLabel').textContent = 'Über ' + (bar.reference === 'VWAP' ? 'Tages-VWAP' : 'Vortagesschluss');
+  $('refLabel').textContent = 'Über ' + (bar.reference === 'VWAP' ? 'Tages-VWAP' : (lastMode ? 'Schluss davor' : 'Vortagesschluss'));
   $('bRef').textContent = `${bar.above_count} von ${n}`; $('bRefBar').style.width = (bar.above_count / n * 100) + '%';
 
   // Kalender
@@ -149,12 +156,12 @@ function render() {
   if (sortBy === 'i') arr.sort((a, b) => Math.abs((b.change_pct || 0) * b.weight) - Math.abs((a.change_pct || 0) * a.weight));
   const refWord = bar.reference === 'VWAP' ? 'VWAP' : 'Vortag';
   $('tiles').innerHTML = arr.map(s => {
-    const ch = s.change_pct || 0, ab = s._a ? s._a.above : ch >= 0;
+    const ch = s.change_pct || 0, sg = s._a ? (s._a.sign ?? (s._a.above ? 1 : -1)) : Math.sign(ch);
     return `<div class="tile ${s.symbol === selected ? 'sel' : ''}" data-t="${esc(s.symbol)}">
       <div class="top"><div><div class="tk">${esc(s.symbol)}</div><div class="nm">${esc(s.name)}</div></div><span class="pill ${cls(ch)} mono">${sgn(ch)} %</span></div>
       <div class="px mono">${s.current ? fmt(s.current) + ' $' : '–'}</div>
       ${spark(pctPath(s), refPct(s))}
-      <div class="meta"><b class="${ab ? 'up' : 'dn'}">${ab ? '▲ über' : '▼ unter'} ${refWord}</b><span>Gew. ${fmt(s.weight, 1)} %</span></div>
+      <div class="meta"><b class="${sg > 0 ? 'up' : sg < 0 ? 'dn' : 'neu'}">${sg > 0 ? '▲ über ' + refWord : sg < 0 ? '▼ unter ' + refWord : '= unverändert'}</b><span>Gew. ${fmt(s.weight, 1)} %</span></div>
     </div>`;
   }).join('');
   document.querySelectorAll('.tile').forEach(el => el.onclick = () => { selected = el.dataset.t; render(); });
@@ -175,7 +182,7 @@ function renderDetail(s) {
   if (!s) return;
   const ch = s.change_pct || 0;
   $('dTitle').textContent = `${s.name} (${s.symbol})`;
-  $('dInfo').innerHTML = `<span class="${cls(ch)}">${sgn(ch)} %</span> · Vortag ${s.prev_close ? fmt(s.prev_close) + ' $' : '–'}${s.vwap ? ' · VWAP ' + fmt(s.vwap) + ' $' : ''}`;
+  $('dInfo').innerHTML = `<span class="${cls(ch)}">${sgn(ch)} %</span> · ${DATA.phase === 'EU' || DATA.phase === 'CLOSED' ? 'Schluss davor' : 'Vortag'} ${s.prev_close ? fmt(s.prev_close) + ' $' : '–'}${s.vwap ? ' · VWAP ' + fmt(s.vwap) + ' $' : ''}`;
   const W = 600, H = 230, p = pctPath(s), labels = s.labels || [];
   if (p.length < 2) { $('dChart').innerHTML = `<text x="300" y="115" fill="#8b95a7" font-size="13" text-anchor="middle" font-family="Inter">Noch kein Kursverlauf für heute</text>`; }
   else {
@@ -193,7 +200,7 @@ function renderDetail(s) {
     g += `<path d="${d} L${W} ${H - 18} L0 ${H - 18} Z" fill="rgba(212,168,67,.10)"/><path d="${d}" fill="none" stroke="#d4a843" stroke-width="2.2" vector-effect="non-scaling-stroke"/>`;
     $('dChart').innerHTML = g;
   }
-  $('dLegend').innerHTML = `<span><i style="height:2px;background:#d4a843"></i>Kurs (heute, MEZ)</span><span><i style="border-top:1px dashed #8b95a7"></i>Vortagesschluss</span>${s.vwap ? '<span><i style="border-top:1px dashed #4f8fe8"></i>Tages-VWAP</span>' : ''}`;
+  $('dLegend').innerHTML = `<span><i style="height:2px;background:#d4a843"></i>Kurs (${DATA.phase === 'EU' || DATA.phase === 'CLOSED' ? 'letzte US-Sitzung' : 'heute'}, MEZ)</span><span><i style="border-top:1px dashed #8b95a7"></i>${DATA.phase === 'EU' || DATA.phase === 'CLOSED' ? 'Schluss davor' : 'Vortagesschluss'}</span>${s.vwap ? '<span><i style="border-top:1px dashed #4f8fe8"></i>Tages-VWAP</span>' : ''}`;
   const news = s.news || [];
   $('dNews').innerHTML = news.length ? news.map(n => `<div class="it"><a href="${esc(n.link)}" target="_blank" rel="noopener">${esc(n.title)}</a><div class="m">${esc(n.source)}${n.source && n.published ? ' · ' : ''}${esc(n.published)}</div></div>`).join('') : '<div class="it m" style="color:var(--muted)">Keine aktuellen Nachrichten.</div>';
 }
