@@ -71,35 +71,31 @@ def _yahoo_api(symbol, interval, range_str, include_pre_post=True):
     return result[0] if result else {}
 
 
-def _get_official_prev_close(symbol):
+def _get_daily_closes(symbol):
     """
-    Offizieller Vortags-Schlusskurs via 1d-Call OHNE Pre/Post-Market.
-    Das ist exakt der Wert den Google Finance und Yahoo Finance selbst
-    als Referenz für die % Veränderung nutzen.
-    
-    Warum separater Call nötig:
-    Mit includePrePost=true gibt Yahoo manchmal einen pre/post-market-
-    berechneten Wert zurück statt dem echten Börsenschlusskurs.
+    Offizielle Tages-Schlusskurse (ohne Pre/Post-Market) der letzten Handelstage
+    VOR heute, älteste zuerst. [-1] = letzter Schluss, [-2] = Schluss davor.
+    Separater Call nötig, weil Yahoo mit includePrePost=true manchmal einen
+    pre/post-market-berechneten Wert statt des echten Schlusskurses liefert.
     """
     today = datetime.datetime.now(TZ_VIENNA).date()
     try:
-        chart = _yahoo_api(symbol, interval="1d", range_str="5d", include_pre_post=False)
+        chart  = _yahoo_api(symbol, interval="1d", range_str="10d", include_pre_post=False)
         ts     = chart.get("timestamp", []) or []
         closes = chart.get("indicators", {}).get("quote", [{}])[0].get("close", [])
-        
-        # Letzter Close der NICHT heute ist → offizieller Settlement
-        for i in range(len(ts) - 1, -1, -1):
-            dt = datetime.datetime.fromtimestamp(ts[i], tz=TZ_VIENNA)
+        out = []
+        for i, t in enumerate(ts):
             cv = closes[i] if i < len(closes) else None
-            if cv and dt.date() < today:
-                return round(cv, 2)
-        
-        # Fallback aus meta
-        meta = chart.get("meta", {})
-        return meta.get("chartPreviousClose") or meta.get("previousClose") or 0
+            if cv and datetime.datetime.fromtimestamp(t, tz=TZ_VIENNA).date() < today:
+                out.append(round(cv, 2))
+        if not out:
+            meta = chart.get("meta", {})
+            pc = meta.get("chartPreviousClose") or meta.get("previousClose") or 0
+            out = [pc] if pc else []
+        return out
     except Exception as e:
-        print(f"  prev_close error {symbol}: {e}")
-        return 0
+        print(f"  daily closes error {symbol}: {e}")
+        return []
 
 
 def _calc_vwap(meta, timestamps, highs, lows, closes, volumes):
@@ -131,16 +127,36 @@ def _calc_vwap(meta, timestamps, highs, lows, closes, volumes):
         return 0
 
 
-def _market_phase():
-    """Grobe Sitzungsphase in Wiener Zeit (wie bisherige Logik)."""
+def _detect_phase(meta=None):
+    """
+    Sitzungsphase der US-Aktien:
+      PRE    = vorbörslicher US-Handel
+      REG    = regulärer US-Handel
+      POST   = nachbörslicher US-Handel
+      EU     = werktags außerhalb der US-Zeiten (Europa-Session, über Nacht)
+      CLOSED = Wochenende
+    Grenzen aus Yahoos currentTradingPeriod → stimmt auch bei Zeitumstellungen.
+    """
     now_v = datetime.datetime.now(TZ_VIENNA)
     if now_v.weekday() >= 5:
         return "CLOSED"
+    now = time.time()
+    ctp = (meta or {}).get("currentTradingPeriod") or {}
+    try:
+        for key, name in (("pre", "PRE"), ("regular", "REG"), ("post", "POST")):
+            p = ctp.get(key) or {}
+            if p.get("start") and p.get("end") and p["start"] <= now < p["end"]:
+                return name
+        if ctp:
+            return "EU"
+    except Exception as e:
+        print(f"  phase error: {e}")
+    # Fallback ohne Yahoo-Zeiten: feste Wiener Uhrzeiten
     h = now_v.hour + now_v.minute / 60.0
     if 10.0 <= h < 15.5:  return "PRE"
     if 15.5 <= h < 22.0:  return "REG"
     if h >= 22.0 or h < 2.0: return "POST"
-    return "CLOSED"
+    return "EU"
 
 
 def _baro_label(score):
@@ -171,13 +187,14 @@ def _calc_barometer(top10, stock_data, future_level, phase):
         if cur <= 0:
             continue
         valid += 1
-        is_above = (cur >= vw) if (use_vwap and vw > 0) else (chg >= 0)
+        diff = (cur - vw) if (use_vwap and vw > 0) else chg
+        sign = 1 if diff > 0 else (-1 if diff < 0 else 0)   # exakt 0 = neutral
         sw   += w
         wchg += chg * w
-        wpos += (1 if is_above else -1) * w
-        up    += 1 if chg >= 0 else 0
-        above += 1 if is_above else 0
-        rows.append({"symbol": s["symbol"], "above": is_above,
+        wpos += sign * w
+        up    += 1 if chg > 0 else 0
+        above += 1 if sign > 0 else 0
+        rows.append({"symbol": s["symbol"], "above": sign > 0, "sign": sign,
                      "contrib_pts": round(chg / 100 * w / 100 * (future_level or 0), 1)})
     if sw == 0:
         return {"score": 0, "label": "Keine Daten", "weighted_change": 0, "up_count": 0,
@@ -190,147 +207,142 @@ def _calc_barometer(top10, stock_data, future_level, phase):
         "score": score, "label": _baro_label(score),
         "weighted_change": round(wc, 2),
         "up_count": up, "above_count": above, "count": valid,
-        "reference": "VWAP" if use_vwap else "Vortagesschluss",
+        "reference": "VWAP" if use_vwap else ("Schluss davor" if phase in ("EU", "CLOSED") else "Vortagesschluss"),
         "weight_sum": round(sum(s["weight"] for s in top10), 1),
         "stocks": rows,
     }
 
 
 def _fetch_stock_data():
+    """
+    Live-Modus (PRE/REG/POST): aktueller Kurs vs. letzter offizieller Schluss, Chart = heute.
+    Letzte-Sitzung-Modus (EU/CLOSED, nur Aktien & VIX/VXN): letzter verfügbarer Kurs
+    inkl. Nachbörse vs. Schluss davor, Chart = komplette letzte US-Sitzung.
+    Futures sind fast rund um die Uhr live und bleiben immer im Live-Modus.
+    """
     symbols  = _all_symbols()
     futures  = ["ES=F", "NQ=F"]
     indices  = [v[0] for v in VOL_INDICES]
     all_syms = symbols + futures + indices
 
     result = {}
-    for sym in symbols:
-        result[sym] = {"current": 0, "prev_close": 0, "open": 0,
-                       "change_pct": 0, "prices": [], "labels": [], "high": 0, "low": 0}
-    for fut_sym, fut_name in [("ES=F", "ES Future"), ("NQ=F", "NQ Future")]:
-        result[fut_sym] = {"name": fut_name, "current": 0, "prev_close": 0, "open": 0,
-                           "change_pct": 0, "prices": [], "labels": [], "high": 0, "low": 0}
+    for sym in all_syms:
+        result[sym] = {"current": 0, "prev_close": 0, "open": 0, "change_pct": 0,
+                       "prices": [], "labels": [], "high": 0, "low": 0, "vwap": 0}
+    result["ES=F"]["name"] = "ES Future"; result["NQ=F"]["name"] = "NQ Future"
     for idx_sym, idx_name in VOL_INDICES:
-        result[idx_sym] = {"name": idx_name, "current": 0, "prev_close": 0, "open": 0,
-                           "change_pct": 0, "prices": [], "labels": [], "high": 0, "low": 0}
+        result[idx_sym]["name"] = idx_name
+
+    # Phase einmal pro Abruf anhand einer Referenzaktie bestimmen
+    try:
+        ref_meta = _yahoo_api("AAPL", interval="5m", range_str="1d", include_pre_post=True).get("meta", {})
+    except Exception as e:
+        print(f"  phase meta error: {e}"); ref_meta = {}
+    phase = _detect_phase(ref_meta)
+    result["__phase__"] = phase
 
     now_v  = datetime.datetime.now(TZ_VIENNA)
     today  = now_v.date()
     now_ts = now_v.strftime("%H:%M")
-    h      = now_v.hour + now_v.minute / 60.0
-    is_pre  = 10.0 <= h < 15.5
-    is_reg  = 15.5 <= h < 22.0
-    is_post = h >= 22.0 or h < 2.0
 
     for sym in all_syms:
         try:
-            is_future = sym in futures or sym in indices
+            is_future = sym in futures
+            last_session = (phase in ("EU", "CLOSED")) and not is_future
 
-            # ── 1. Offiziellen prev_close holen (separater Call ohne PrePost) ──
-            prev_close = _get_official_prev_close(sym)
+            # ── 1. Offizielle Tagesschlüsse (ohne PrePost) ─────────────────
+            dcl = _get_daily_closes(sym)
             time.sleep(0.15)
 
-            # ── 2. Intraday-Daten mit PrePost=true für Chart + current_price ──
+            # ── 2. Intraday 5m inkl. Pre/Post ──────────────────────────────
             chart      = _yahoo_api(sym, interval="5m", range_str="5d", include_pre_post=True)
             meta       = chart.get("meta", {})
             timestamps = chart.get("timestamp", []) or []
-            quote_data = chart.get("indicators", {}).get("quote", [{}])[0]
-            closes     = quote_data.get("close", [])
-            highs      = quote_data.get("high",  [])
-            lows       = quote_data.get("low",   [])
-            volumes    = quote_data.get("volume", []) or []
+            q          = chart.get("indicators", {}).get("quote", [{}])[0]
+            closes     = q.get("close", []) or []
+            highs      = q.get("high",  []) or []
+            lows       = q.get("low",   []) or []
+            volumes    = q.get("volume", []) or []
 
-            # ── 3. Aktuellen Preis aus Meta (immer aktuell, auch Pre-Market) ──
-            pre_p  = meta.get("preMarketPrice")    or 0
+            pre_p  = meta.get("preMarketPrice")     or 0
             reg_p  = meta.get("regularMarketPrice") or 0
-            post_p = meta.get("postMarketPrice")   or 0
+            post_p = meta.get("postMarketPrice")    or 0
 
-            if is_pre and pre_p > 0:
-                current_price = pre_p;  session = "PRE"
-            elif is_reg and reg_p > 0:
-                current_price = reg_p;  session = "REG"
-            elif is_post and post_p > 0:
-                current_price = post_p; session = "POST"
-            elif reg_p > 0:
-                current_price = reg_p;  session = "REG"
-            elif pre_p > 0:
-                current_price = pre_p;  session = "PRE"
+            # ── 3. Aktueller Kurs + Referenz je Modus ──────────────────────
+            if is_future:
+                current_price = reg_p; session = "LIVE"
+                prev_close = dcl[-1] if dcl else 0
+            elif last_session:
+                current_price = post_p or reg_p; session = "LAST"
+                prev_close = dcl[-2] if len(dcl) >= 2 else (dcl[-1] if dcl else 0)
+                if not post_p and dcl and len(dcl) >= 2:
+                    current_price = dcl[-1]
             else:
-                current_price = 0;      session = "—"
+                if phase == "PRE":
+                    current_price = pre_p or reg_p
+                elif phase == "POST":
+                    current_price = post_p or reg_p
+                else:
+                    current_price = reg_p or pre_p
+                session = phase
+                prev_close = dcl[-1] if dcl else 0
 
-            # ── 4. Chart-Punkte für heute ──────────────────────────────────
-            cutoff = datetime.datetime.combine(
-                today,
-                datetime.time(0, 0) if is_future else datetime.time(10, 0),
-                tzinfo=TZ_VIENNA
-            )
-
-            today_prices, today_labels = [], []
-            for i, ts in enumerate(timestamps):
+            # ── 4. Chartpunkte ─────────────────────────────────────────────
+            bars = []
+            for i, t in enumerate(timestamps):
                 cv = closes[i] if i < len(closes) else None
                 if cv is None: continue
-                dt = datetime.datetime.fromtimestamp(ts, tz=TZ_VIENNA)
-                if dt >= cutoff:
-                    today_prices.append(round(cv, 2))
-                    today_labels.append(dt.strftime("%H:%M"))
+                bars.append((datetime.datetime.fromtimestamp(t, tz=TZ_VIENNA), cv))
 
-            # Vor Cash Open: aktuellen Preis als Startpunkt einfügen
-            if not today_prices and current_price > 0:
-                today_prices = [round(current_price, 2)]
-                today_labels = [now_ts]
+            if last_session:
+                # komplette letzte US-Sitzung (vorbörslich bis nachbörslich)
+                past = [b for b in bars if b[0].date() < today or b[0].hour < 10]
+                if past:
+                    # Sitzung = Bars ab 10:00 MEZ des letzten Handelstags bis 02:00 danach
+                    last_day = max(b[0].date() for b in past if b[0].hour >= 10) if any(b[0].hour >= 10 for b in past) else past[-1][0].date()
+                    start = datetime.datetime.combine(last_day, datetime.time(10, 0), tzinfo=TZ_VIENNA)
+                    end   = start + datetime.timedelta(hours=16)
+                    sel = [b for b in past if start <= b[0] < end]
+                else:
+                    sel = []
+            else:
+                cutoff = datetime.datetime.combine(
+                    today, datetime.time(0, 0) if (is_future or sym in indices) else datetime.time(10, 0),
+                    tzinfo=TZ_VIENNA)
+                sel = [b for b in bars if b[0] >= cutoff]
 
-            # Aktuellsten Preis ans Ende
-            if current_price > 0:
-                if not today_prices:
-                    today_prices = [round(current_price, 2)]
-                    today_labels = [now_ts]
-                elif today_prices[-1] != round(current_price, 2):
-                    today_prices.append(round(current_price, 2))
-                    today_labels.append(now_ts)
+            prices = [round(b[1], 2) for b in sel]
+            labels = [b[0].strftime("%H:%M") for b in sel]
+            if not last_session and current_price > 0 and (not prices or prices[-1] != round(current_price, 2)):
+                prices.append(round(current_price, 2)); labels.append(now_ts)
+            if not current_price and prices:
+                current_price = prices[-1]
 
-            # Wochenend-Fallback
-            if not today_prices and timestamps:
-                last_date = datetime.datetime.fromtimestamp(timestamps[-1], tz=TZ_VIENNA).date()
-                for i, ts in enumerate(timestamps):
-                    cv = closes[i] if i < len(closes) else None
-                    if cv is None: continue
-                    if datetime.datetime.fromtimestamp(ts, tz=TZ_VIENNA).date() == last_date:
-                        today_prices.append(round(cv, 2))
-                        today_labels.append(datetime.datetime.fromtimestamp(ts, tz=TZ_VIENNA).strftime("%H:%M"))
-                if today_prices and not current_price:
-                    current_price = today_prices[-1]
+            open_price = prices[0] if prices else (meta.get("regularMarketOpen") or 0)
 
-            open_price = today_prices[0] if today_prices else (meta.get("regularMarketOpen") or 0)
-
-            # ── 5. % Change mit offiziellem prev_close ─────────────────────
+            # ── 5. Veränderung ────────────────────────────────────────────
             if prev_close > 0 and current_price > 0:
                 change_pct = (current_price - prev_close) / prev_close * 100
-            elif open_price > 0 and current_price > 0:
-                change_pct = (current_price - open_price) / open_price * 100
             else:
                 change_pct = 0
 
-            # ── 6. VWAP der regulären US-Sitzung (nur Aktien mit Volumen) ──────
-            vwap = _calc_vwap(meta, timestamps, highs, lows, closes, volumes)
+            # ── 6. VWAP der regulären Sitzung (nur live) ───────────────────
+            vwap = 0 if last_session else _calc_vwap(meta, timestamps, highs, lows, closes, volumes)
 
-            processed = {
+            result[sym].update({
                 "current":    round(current_price, 2),
                 "prev_close": round(prev_close, 2),
                 "open":       round(open_price, 2),
                 "change_pct": round(change_pct, 2),
-                "prices":     today_prices,
-                "labels":     today_labels,
+                "prices":     prices,
+                "labels":     labels,
                 "high":       round(max([v for v in highs if v] or [0]), 2),
                 "low":        round(min([v for v in lows if v and v > 0] or [0]), 2),
                 "session":    session,
                 "vwap":       vwap,
-            }
-            if sym in futures:
-                processed["name"] = "ES Future" if sym == "ES=F" else "NQ Future"
-
-            result[sym] = {**result[sym], **processed}
-            print(f"  {sym} [{session}]: {current_price:.2f} | prev={prev_close:.2f} | "
-                  f"chg={change_pct:+.2f}% | pts={len(today_prices)} | "
-                  f"labels={today_labels[0] if today_labels else '—'}..{today_labels[-1] if today_labels else '—'}")
+            })
+            print(f"  {sym} [{session}]: {current_price:.2f} | ref={prev_close:.2f} | "
+                  f"chg={change_pct:+.2f}% | pts={len(prices)}")
             time.sleep(0.2)
 
         except Exception as e:
@@ -537,7 +549,7 @@ def api_data():
     sd = get_stock_data(force=force)
     nd = get_news_data(force=force)
     cd = get_calendar_data(force=force)
-    phase = _market_phase()
+    phase = sd.get("__phase__") or _detect_phase()
     es_lvl = sd.get("ES=F", {}).get("current", 0)
     nq_lvl = sd.get("NQ=F", {}).get("current", 0)
     sp500 = [{**s, **sd.get(s["symbol"],{}), "news": nd.get(s["symbol"],[])} for s in SP500_TOP10]
