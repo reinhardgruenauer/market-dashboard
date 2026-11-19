@@ -149,7 +149,7 @@ function render() {
   const list = sec.stocks.map(s => ({ ...s, _a: aboveMap[s.symbol] }));
   if (!selected || !list.find(s => s.symbol === selected)) selected = list[0] && list[0].symbol;
   $('tilesH').textContent = 'Die 10 Schwergewichte im ' + M_.idx;
-  $('wInfo').textContent = `Gewicht = Anteil im ${M_.idx} (Stand ${sec.weights_stand || '–'}).`;
+  $('wInfo').textContent = `Gewicht = Anteil im ${M_.idx} – ${sec.weights_stand || '–'}.`;
   const arr = [...list];
   if (sortBy === 'w') arr.sort((a, b) => b.weight - a.weight);
   if (sortBy === 'c') arr.sort((a, b) => (b.change_pct || 0) - (a.change_pct || 0));
