@@ -90,3 +90,5 @@ footer{margin-top:22px;color:var(--muted);font-size:11.5px;text-align:center}
 
 @media (max-width:1000px){.grid-top{grid-template-columns:1fr 1fr}.grid-top .ctxcard{grid-column:1/-1}.tiles{grid-template-columns:repeat(3,1fr)}.grid-bot{grid-template-columns:1fr}}
 @media (max-width:620px){.grid-top{grid-template-columns:1fr}.tiles{grid-template-columns:repeat(2,1fr)}.cal .ev{grid-template-columns:50px 1fr}.cal .ev .vals{grid-column:1/-1}}
+
+.infobar{background:#14202e;border:1px solid #2b4560;color:#c7dcf2;border-radius:10px;padding:10px 14px;margin-bottom:14px;font-size:13px}
