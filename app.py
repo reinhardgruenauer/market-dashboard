@@ -344,26 +344,35 @@ def _fetch_stock_data():
             lows       = q.get("low",   []) or []
             volumes    = q.get("volume", []) or []
 
-            pre_p  = meta.get("preMarketPrice")     or 0
-            reg_p  = meta.get("regularMarketPrice") or 0
-            post_p = meta.get("postMarketPrice")    or 0
+            reg_p = meta.get("regularMarketPrice") or 0
+            # Yahoo liefert vor-/nachbörsliche Kurse inzwischen als "fulldayPrice"
+            # (früher preMarketPrice/postMarketPrice – beide Varianten unterstützt).
+            ext_p = (meta.get("fulldayPrice") or meta.get("preMarketPrice")
+                     or meta.get("postMarketPrice") or 0)
+            # Fallback: letzter 5-Minuten-Bar der laufenden Phase
+            ctp = meta.get("currentTradingPeriod") or {}
+            def _last_bar_since(start_ts):
+                if not start_ts: return 0
+                for i in range(len(timestamps) - 1, -1, -1):
+                    cv = closes[i] if i < len(closes) else None
+                    if cv and timestamps[i] >= start_ts:
+                        return cv
+                return 0
 
             # ── 3. Aktueller Kurs + Referenz je Modus ──────────────────────
             if is_future:
                 current_price = reg_p; session = "LIVE"
                 prev_close = dcl[-1] if dcl else 0
             elif last_session:
-                current_price = post_p or reg_p; session = "LAST"
+                current_price = ext_p or reg_p or (dcl[-1] if dcl else 0); session = "LAST"
                 prev_close = dcl[-2] if len(dcl) >= 2 else (dcl[-1] if dcl else 0)
-                if not post_p and dcl and len(dcl) >= 2:
-                    current_price = dcl[-1]
             else:
                 if phase == "PRE":
-                    current_price = pre_p or reg_p
+                    current_price = ext_p or _last_bar_since((ctp.get("pre") or {}).get("start")) or reg_p
                 elif phase == "POST":
-                    current_price = post_p or reg_p
+                    current_price = ext_p or _last_bar_since((ctp.get("post") or {}).get("start")) or reg_p
                 else:
-                    current_price = reg_p or pre_p
+                    current_price = reg_p or ext_p
                 session = phase
                 prev_close = dcl[-1] if dcl else 0
 
