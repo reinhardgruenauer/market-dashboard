@@ -1,0 +1,35 @@
+{
+  "_hinweis": "Indexgewichte der Top 10. Alphabet A+C zusammengefasst unter GOOGL. Bitte regelmäßig aktualisieren (z. B. monatlich).",
+  "nq100": {
+    "stand": "02.11.2026",
+    "quelle": "Nasdaq Global Indexes – NDX Gewichtungsliste (nasdaq.com/docs/global-indexes/NDX)",
+    "top10": [
+      {"symbol": "AAPL",  "name": "Apple",            "weight": 8.15},
+      {"symbol": "NVDA",  "name": "Nvidia",           "weight": 8.03},
+      {"symbol": "MSFT",  "name": "Microsoft",        "weight": 6.21},
+      {"symbol": "GOOGL", "name": "Alphabet (A+C)",   "weight": 5.24},
+      {"symbol": "AMZN",  "name": "Amazon",           "weight": 4.37},
+      {"symbol": "MU",    "name": "Micron",           "weight": 4.29},
+      {"symbol": "TSLA",  "name": "Tesla",            "weight": 3.50},
+      {"symbol": "AMD",   "name": "AMD",              "weight": 3.47},
+      {"symbol": "META",  "name": "Meta Platforms",   "weight": 2.98},
+      {"symbol": "WMT",   "name": "Walmart",          "weight": 2.83}
+    ]
+  },
+  "sp500": {
+    "stand": "bisheriger Stand im Code (Frühjahr 2026) – bitte prüfen",
+    "quelle": "manuell",
+    "top10": [
+      {"symbol": "NVDA",  "name": "Nvidia",               "weight": 7.81},
+      {"symbol": "AAPL",  "name": "Apple",                "weight": 6.65},
+      {"symbol": "GOOGL", "name": "Alphabet (A+C)",       "weight": 5.58},
+      {"symbol": "MSFT",  "name": "Microsoft",            "weight": 5.20},
+      {"symbol": "AMZN",  "name": "Amazon",               "weight": 3.57},
+      {"symbol": "AVGO",  "name": "Broadcom",             "weight": 2.79},
+      {"symbol": "META",  "name": "Meta Platforms",       "weight": 2.46},
+      {"symbol": "TSLA",  "name": "Tesla",                "weight": 1.98},
+      {"symbol": "BRK-B", "name": "Berkshire Hathaway",   "weight": 1.56},
+      {"symbol": "JPM",   "name": "JPMorgan",             "weight": 1.45}
+    ]
+  }
+}

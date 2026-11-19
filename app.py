@@ -18,30 +18,23 @@ TZ_VIENNA = ZoneInfo("Europe/Vienna")
 CALENDAR_CACHE_FILE = Path(__file__).parent / "calendar_cache.json"
 app = Flask(__name__)
 
-SP500_TOP10 = [
-    {"symbol": "NVDA",  "name": "Nvidia",               "weight": 7.81},
-    {"symbol": "AAPL",  "name": "Apple",                "weight": 6.65},
-    {"symbol": "MSFT",  "name": "Microsoft",            "weight": 5.20},
-    {"symbol": "AMZN",  "name": "Amazon",               "weight": 3.57},
-    {"symbol": "GOOGL", "name": "Alphabet A",           "weight": 3.10},
-    {"symbol": "AVGO",  "name": "Broadcom",             "weight": 2.79},
-    {"symbol": "GOOG",  "name": "Alphabet C",           "weight": 2.48},
-    {"symbol": "META",  "name": "Meta Platforms",       "weight": 2.46},
-    {"symbol": "TSLA",  "name": "Tesla",                "weight": 1.98},
-    {"symbol": "BRK-B", "name": "Berkshire Hathaway B", "weight": 1.56},
-]
-NQ100_TOP10 = [
-    {"symbol": "NVDA",  "name": "Nvidia",         "weight": 8.90},
-    {"symbol": "AAPL",  "name": "Apple",          "weight": 7.35},
-    {"symbol": "MSFT",  "name": "Microsoft",      "weight": 6.13},
-    {"symbol": "AMZN",  "name": "Amazon",         "weight": 4.90},
-    {"symbol": "META",  "name": "Meta Platforms", "weight": 4.03},
-    {"symbol": "GOOGL", "name": "Alphabet A",     "weight": 3.77},
-    {"symbol": "TSLA",  "name": "Tesla",          "weight": 3.65},
-    {"symbol": "GOOG",  "name": "Alphabet C",     "weight": 3.51},
-    {"symbol": "WMT",   "name": "Walmart",        "weight": 3.08},
-    {"symbol": "AVGO",  "name": "Broadcom",       "weight": 3.00},
-]
+WEIGHTS_FILE = Path(__file__).parent / "weights.json"
+
+def _load_weights():
+    """Indexgewichte aus weights.json (leicht aktualisierbar ohne Code-Änderung)."""
+    with open(WEIGHTS_FILE, "r", encoding="utf-8") as f:
+        w = json.load(f)
+    return w
+
+_WEIGHTS     = _load_weights()
+SP500_TOP10  = _WEIGHTS["sp500"]["top10"]
+NQ100_TOP10  = _WEIGHTS["nq100"]["top10"]
+VOL_INDICES  = [("^VIX", "VIX"), ("^VXN", "VXN")]
+
+# Barometer-Parameter
+BARO_FULL_SCALE_PCT = 2.0   # ±2 % gewichtete Veränderung = Vollausschlag ±100
+BARO_W_CHANGE       = 0.7   # Anteil gewichtete Veränderung
+BARO_W_POSITION     = 0.3   # Anteil Lage zur Referenz (Vortagesschluss bzw. VWAP)
 
 _cache = {
     "stock_data": None, "news_data": None, "calendar_data": None,
@@ -109,10 +102,105 @@ def _get_official_prev_close(symbol):
         return 0
 
 
+def _calc_vwap(meta, timestamps, highs, lows, closes, volumes):
+    """
+    VWAP der heutigen regulären Sitzung (typischer Preis × Volumen).
+    Sitzungsgrenzen kommen aus Yahoos currentTradingPeriod → stimmt auch bei
+    Sommerzeit-Verschiebungen. Vor 15:30 MEZ (kein Volumen) → 0.
+    """
+    try:
+        reg = meta.get("currentTradingPeriod", {}).get("regular", {})
+        start, end = reg.get("start"), reg.get("end")
+        if not start or not end:
+            return 0
+        pv = vol = 0.0
+        for i, ts in enumerate(timestamps):
+            if ts < start or ts >= end:
+                continue
+            c = closes[i] if i < len(closes) else None
+            v = volumes[i] if i < len(volumes) else None
+            if not c or not v:
+                continue
+            hi = highs[i] if i < len(highs) and highs[i] else c
+            lo = lows[i] if i < len(lows) and lows[i] else c
+            pv += (hi + lo + c) / 3 * v
+            vol += v
+        return round(pv / vol, 2) if vol > 0 else 0
+    except Exception as e:
+        print(f"  VWAP error: {e}")
+        return 0
+
+
+def _market_phase():
+    """Grobe Sitzungsphase in Wiener Zeit (wie bisherige Logik)."""
+    now_v = datetime.datetime.now(TZ_VIENNA)
+    if now_v.weekday() >= 5:
+        return "CLOSED"
+    h = now_v.hour + now_v.minute / 60.0
+    if 10.0 <= h < 15.5:  return "PRE"
+    if 15.5 <= h < 22.0:  return "REG"
+    if h >= 22.0 or h < 2.0: return "POST"
+    return "CLOSED"
+
+
+def _baro_label(score):
+    if score <= -50: return "Stark bärisch"
+    if score <= -15: return "Bärisch"
+    if score < 15:   return "Neutral"
+    if score < 50:   return "Bullisch"
+    return "Stark bullisch"
+
+
+def _calc_barometer(top10, stock_data, future_level, phase):
+    """
+    Barometer −100 … +100:
+      70 % gewichtete Veränderung zum Vortagesschluss (±2 % = Vollausschlag)
+      30 % gewichtete Lage zur Referenz: im US-Handel Tages-VWAP, sonst Vortagesschluss
+    Beschreibt den Ist-Zustand der Schwergewichte – keine Prognose.
+    """
+    use_vwap = phase == "REG"
+    sw = wchg = wpos = 0.0
+    up = above = valid = 0
+    rows = []
+    for s in top10:
+        d   = stock_data.get(s["symbol"], {})
+        w   = s["weight"]
+        chg = d.get("change_pct", 0) or 0
+        cur = d.get("current", 0) or 0
+        vw  = d.get("vwap", 0) or 0
+        if cur <= 0:
+            continue
+        valid += 1
+        is_above = (cur >= vw) if (use_vwap and vw > 0) else (chg >= 0)
+        sw   += w
+        wchg += chg * w
+        wpos += (1 if is_above else -1) * w
+        up    += 1 if chg >= 0 else 0
+        above += 1 if is_above else 0
+        rows.append({"symbol": s["symbol"], "above": is_above,
+                     "contrib_pts": round(chg / 100 * w / 100 * (future_level or 0), 1)})
+    if sw == 0:
+        return {"score": 0, "label": "Keine Daten", "weighted_change": 0, "up_count": 0,
+                "above_count": 0, "count": 0, "reference": "—", "weight_sum": 0, "stocks": []}
+    wc   = wchg / sw
+    chgp = max(-1.0, min(1.0, wc / BARO_FULL_SCALE_PCT))
+    posp = wpos / sw
+    score = round((BARO_W_CHANGE * chgp + BARO_W_POSITION * posp) * 100)
+    return {
+        "score": score, "label": _baro_label(score),
+        "weighted_change": round(wc, 2),
+        "up_count": up, "above_count": above, "count": valid,
+        "reference": "VWAP" if use_vwap else "Vortagesschluss",
+        "weight_sum": round(sum(s["weight"] for s in top10), 1),
+        "stocks": rows,
+    }
+
+
 def _fetch_stock_data():
     symbols  = _all_symbols()
     futures  = ["ES=F", "NQ=F"]
-    all_syms = symbols + futures
+    indices  = [v[0] for v in VOL_INDICES]
+    all_syms = symbols + futures + indices
 
     result = {}
     for sym in symbols:
@@ -120,6 +208,9 @@ def _fetch_stock_data():
                        "change_pct": 0, "prices": [], "labels": [], "high": 0, "low": 0}
     for fut_sym, fut_name in [("ES=F", "ES Future"), ("NQ=F", "NQ Future")]:
         result[fut_sym] = {"name": fut_name, "current": 0, "prev_close": 0, "open": 0,
+                           "change_pct": 0, "prices": [], "labels": [], "high": 0, "low": 0}
+    for idx_sym, idx_name in VOL_INDICES:
+        result[idx_sym] = {"name": idx_name, "current": 0, "prev_close": 0, "open": 0,
                            "change_pct": 0, "prices": [], "labels": [], "high": 0, "low": 0}
 
     now_v  = datetime.datetime.now(TZ_VIENNA)
@@ -132,7 +223,7 @@ def _fetch_stock_data():
 
     for sym in all_syms:
         try:
-            is_future = sym in futures
+            is_future = sym in futures or sym in indices
 
             # ── 1. Offiziellen prev_close holen (separater Call ohne PrePost) ──
             prev_close = _get_official_prev_close(sym)
@@ -146,6 +237,7 @@ def _fetch_stock_data():
             closes     = quote_data.get("close", [])
             highs      = quote_data.get("high",  [])
             lows       = quote_data.get("low",   [])
+            volumes    = quote_data.get("volume", []) or []
 
             # ── 3. Aktuellen Preis aus Meta (immer aktuell, auch Pre-Market) ──
             pre_p  = meta.get("preMarketPrice")    or 0
@@ -217,6 +309,9 @@ def _fetch_stock_data():
             else:
                 change_pct = 0
 
+            # ── 6. VWAP der regulären US-Sitzung (nur Aktien mit Volumen) ──────
+            vwap = _calc_vwap(meta, timestamps, highs, lows, closes, volumes)
+
             processed = {
                 "current":    round(current_price, 2),
                 "prev_close": round(prev_close, 2),
@@ -227,6 +322,7 @@ def _fetch_stock_data():
                 "high":       round(max([v for v in highs if v] or [0]), 2),
                 "low":        round(min([v for v in lows if v and v > 0] or [0]), 2),
                 "session":    session,
+                "vwap":       vwap,
             }
             if sym in futures:
                 processed["name"] = "ES Future" if sym == "ES=F" else "NQ Future"
@@ -248,7 +344,7 @@ def _fetch_news():
     seen = {s["symbol"]: s["name"] for s in SP500_TOP10 + NQ100_TOP10}
     for sym, name in seen.items():
         try:
-            q    = name.replace(" ", "+") + "+Aktie"
+            q    = name.split(" (")[0].replace(" ", "+") + "+Aktie"
             feed = feedparser.parse(f"https://news.google.com/rss/search?q={q}&hl=de&gl=DE&ceid=DE:de")
             all_news[sym] = [
                 {"title": e.get("title",""), "link": e.get("link",""),
@@ -428,7 +524,7 @@ def _calc_probability(top10, stock_data):
             up += 1; twu += s["weight"]
     prob = (twu / tw * 100) if tw > 0 else 50
     return {"long_pct":round(prob,1),"short_pct":round(100-prob,1),
-            "up_count":up,"down_count":10-up,
+            "up_count":up,"down_count":len(top10)-up,
             "signal":"LONG" if prob>50 else "SHORT" if prob<50 else "NEUTRAL"}
 
 @app.route("/")
@@ -441,13 +537,22 @@ def api_data():
     sd = get_stock_data(force=force)
     nd = get_news_data(force=force)
     cd = get_calendar_data(force=force)
+    phase = _market_phase()
+    es_lvl = sd.get("ES=F", {}).get("current", 0)
+    nq_lvl = sd.get("NQ=F", {}).get("current", 0)
     sp500 = [{**s, **sd.get(s["symbol"],{}), "news": nd.get(s["symbol"],[])} for s in SP500_TOP10]
     nq100 = [{**s, **sd.get(s["symbol"],{}), "news": nd.get(s["symbol"],[])} for s in NQ100_TOP10]
     return jsonify({
         "timestamp": datetime.datetime.now(TZ_VIENNA).strftime("%Y-%m-%d %H:%M:%S") + " MEZ",
+        "phase":    phase,
         "futures":  {"ES": sd.get("ES=F",{}), "NQ": sd.get("NQ=F",{})},
-        "sp500":    {"stocks": sp500, "probability": _calc_probability(SP500_TOP10, sd)},
-        "nq100":    {"stocks": nq100, "probability": _calc_probability(NQ100_TOP10, sd)},
+        "vol":      {"VIX": sd.get("^VIX",{}), "VXN": sd.get("^VXN",{})},
+        "sp500":    {"stocks": sp500, "barometer": _calc_barometer(SP500_TOP10, sd, es_lvl, phase),
+                     "probability": _calc_probability(SP500_TOP10, sd),
+                     "weights_stand": _WEIGHTS["sp500"].get("stand", "")},
+        "nq100":    {"stocks": nq100, "barometer": _calc_barometer(NQ100_TOP10, sd, nq_lvl, phase),
+                     "probability": _calc_probability(NQ100_TOP10, sd),
+                     "weights_stand": _WEIGHTS["nq100"].get("stand", "")},
         "calendar": cd,
     })
 
