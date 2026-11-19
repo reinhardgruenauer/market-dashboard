@@ -30,6 +30,7 @@ _WEIGHTS     = _load_weights()
 SP500_TOP10  = _WEIGHTS["sp500"]["top10"]
 NQ100_TOP10  = _WEIGHTS["nq100"]["top10"]
 VOL_INDICES  = [("^VIX", "VIX"), ("^VXN", "VXN")]
+INDEX_SYMBOL = {"nq100": "^NDX", "sp500": "^GSPC"}   # für die Gewichts-Fortschreibung
 
 # Barometer-Parameter
 BARO_FULL_SCALE_PCT = 2.0   # ±2 % gewichtete Veränderung = Vollausschlag ±100
@@ -125,6 +126,85 @@ def _calc_vwap(meta, timestamps, highs, lows, closes, volumes):
     except Exception as e:
         print(f"  VWAP error: {e}")
         return 0
+
+
+def _parse_stand(stand):
+    try:
+        return datetime.datetime.strptime(stand.strip()[:10], "%d.%m.%Y").date()
+    except Exception:
+        return None
+
+
+def _close_on_or_before(symbol, day, today):
+    """(Schluss am/vor Stichtag, letzter Schluss vor heute) aus Tagesdaten."""
+    chart  = _yahoo_api(symbol, interval="1d", range_str="1y", include_pre_post=False)
+    ts     = chart.get("timestamp", []) or []
+    closes = chart.get("indicators", {}).get("quote", [{}])[0].get("close", [])
+    base = last = None
+    for i, t in enumerate(ts):
+        cv = closes[i] if i < len(closes) else None
+        if not cv: continue
+        d = datetime.datetime.fromtimestamp(t, tz=TZ_VIENNA).date()
+        if d <= day:  base = cv
+        if d < today: last = cv
+    return base, last
+
+
+def _compute_drifted_weights(key):
+    """
+    Schreibt die Stichtags-Gewichte aus weights.json mit der Kursentwicklung fort:
+      w_heute = w_stichtag × (Aktie_jetzt / Aktie_stichtag) ÷ (Index_jetzt / Index_stichtag)
+    Basis = letzter Tagesschluss. So bleiben die Gewichte ohne manuelle Pflege aktuell;
+    nur bei Änderungen der Top-10-Zusammensetzung muss weights.json angepasst werden.
+    """
+    cfg   = _WEIGHTS[key]
+    base  = cfg["top10"]
+    stand = _parse_stand(cfg.get("stand", ""))
+    today = datetime.datetime.now(TZ_VIENNA).date()
+    if not stand or stand >= today:
+        return [dict(s, weight_base=s["weight"]) for s in base], None
+    try:
+        ib, il = _close_on_or_before(INDEX_SYMBOL[key], stand, today)
+        if not ib or not il:
+            raise ValueError("keine Indexdaten")
+        idx_factor = il / ib
+        out, last_day = [], None
+        for s in base:
+            sb, sl = _close_on_or_before(s["symbol"], stand, today)
+            time.sleep(0.1)
+            f = (sl / sb / idx_factor) if (sb and sl) else 1.0
+            out.append(dict(s, weight=round(s["weight"] * f, 2), weight_base=s["weight"]))
+        out.sort(key=lambda x: x["weight"], reverse=True)
+        return out, today
+    except Exception as e:
+        print(f"  weight drift error {key}: {e}")
+        return [dict(s, weight_base=s["weight"]) for s in base], None
+
+
+_weights_cache = {"day": None, "nq100": None, "sp500": None, "updated": None}
+_weights_lock  = threading.Lock()
+
+def get_weights(key):
+    """Fortgeschriebene Gewichte, einmal pro Tag neu berechnet."""
+    today = datetime.datetime.now(TZ_VIENNA).date()
+    with _weights_lock:
+        if _weights_cache["day"] == today and _weights_cache[key]:
+            return _weights_cache[key]
+    w, upd = _compute_drifted_weights(key)
+    with _weights_lock:
+        if _weights_cache["day"] != today:
+            _weights_cache.update({"day": today, "nq100": None, "sp500": None})
+        _weights_cache[key] = w
+        _weights_cache["updated"] = upd
+    return w
+
+
+def _weights_info(key):
+    stand = _WEIGHTS[key].get("stand", "")
+    upd = _weights_cache.get("updated")
+    if upd:
+        return f"Basis {stand}, täglich mit den Kursen fortgeschrieben (Stand {upd.strftime('%d.%m.%Y')})"
+    return f"Stand {stand}"
 
 
 def _detect_phase(meta=None):
@@ -552,19 +632,21 @@ def api_data():
     phase = sd.get("__phase__") or _detect_phase()
     es_lvl = sd.get("ES=F", {}).get("current", 0)
     nq_lvl = sd.get("NQ=F", {}).get("current", 0)
-    sp500 = [{**s, **sd.get(s["symbol"],{}), "news": nd.get(s["symbol"],[])} for s in SP500_TOP10]
-    nq100 = [{**s, **sd.get(s["symbol"],{}), "news": nd.get(s["symbol"],[])} for s in NQ100_TOP10]
+    w_sp = get_weights("sp500")
+    w_nq = get_weights("nq100")
+    sp500 = [{**s, **sd.get(s["symbol"],{}), "news": nd.get(s["symbol"],[])} for s in w_sp]
+    nq100 = [{**s, **sd.get(s["symbol"],{}), "news": nd.get(s["symbol"],[])} for s in w_nq]
     return jsonify({
         "timestamp": datetime.datetime.now(TZ_VIENNA).strftime("%Y-%m-%d %H:%M:%S") + " MEZ",
         "phase":    phase,
         "futures":  {"ES": sd.get("ES=F",{}), "NQ": sd.get("NQ=F",{})},
         "vol":      {"VIX": sd.get("^VIX",{}), "VXN": sd.get("^VXN",{})},
-        "sp500":    {"stocks": sp500, "barometer": _calc_barometer(SP500_TOP10, sd, es_lvl, phase),
-                     "probability": _calc_probability(SP500_TOP10, sd),
-                     "weights_stand": _WEIGHTS["sp500"].get("stand", "")},
-        "nq100":    {"stocks": nq100, "barometer": _calc_barometer(NQ100_TOP10, sd, nq_lvl, phase),
-                     "probability": _calc_probability(NQ100_TOP10, sd),
-                     "weights_stand": _WEIGHTS["nq100"].get("stand", "")},
+        "sp500":    {"stocks": sp500, "barometer": _calc_barometer(w_sp, sd, es_lvl, phase),
+                     "probability": _calc_probability(w_sp, sd),
+                     "weights_stand": _weights_info("sp500")},
+        "nq100":    {"stocks": nq100, "barometer": _calc_barometer(w_nq, sd, nq_lvl, phase),
+                     "probability": _calc_probability(w_nq, sd),
+                     "weights_stand": _weights_info("nq100")},
         "calendar": cd,
     })
 
