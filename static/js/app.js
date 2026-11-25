@@ -123,8 +123,10 @@ function render() {
 
   // Kontext
   const f = DATA.futures, v = DATA.vol || {};
+  const stale = d => d && d.quote_time && (Date.now() / 1000 - d.quote_time) > 6 * 3600;
   const k = (t, d, pts) => {
     if (!d || !d.current) return `<div class="k"><div class="t">${t}</div><div class="v mono">–</div><div class="c">keine Daten</div></div>`;
+    if (pts && stale(d) && DATA.phase === 'REG') return `<div class="k"><div class="t">${t}</div><div class="v mono">${fmt(d.current)}</div><div class="c" style="color:var(--muted)">Schluss Vortag · kein Live-Wert</div></div>`;
     const ch = pts ? d.current - (d.prev_close || d.current) : d.change_pct;
     const good = pts ? -ch : ch;
     return `<div class="k"><div class="t">${t}</div><div class="v mono">${fmt(d.current, d.current > 1000 ? 0 : 2)}</div><div class="c ${cls(good)}">${sgn(ch)}${pts ? ' Pkt' : ' %'}</div></div>`;
@@ -141,7 +143,7 @@ function render() {
   const evs = DATA.calendar || [];
   $('calendar').innerHTML = evs.length ? evs.map(e => `<div class="ev">
       <b class="mono">${esc(e.time || '–')}</b><span>${esc(e.country)}</span><span>${esc(e.title)}</span>
-      <span class="vals"><span>Prognose <b>${esc(e.forecast || '–')}</b></span><span>Vorher <b>${esc(e.previous || '–')}</b></span><span>Aktuell <b class="${e.actual ? 'neu' : ''}">${esc(e.actual || '–')}</b></span></span>
+      <span class="vals"><span>Prognose <b>${esc(e.forecast || '–')}</b></span><span>Vorher <b>${esc(e.previous || '–')}</b></span>${e.actual ? `<span>Aktuell <b class="neu">${esc(e.actual)}</b></span>` : ''}</span>
     </div>`).join('') : '<div class="empty">Heute keine hochrelevanten Termine.</div>';
 
   // Kacheln
