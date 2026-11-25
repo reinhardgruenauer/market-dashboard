@@ -429,6 +429,7 @@ def _fetch_stock_data():
                 "low":        round(min([v for v in lows if v and v > 0] or [0]), 2),
                 "session":    session,
                 "vwap":       vwap,
+                "quote_time": meta.get("regularMarketTime") or 0,
             })
             print(f"  {sym} [{session}]: {current_price:.2f} | ref={prev_close:.2f} | "
                   f"chg={change_pct:+.2f}% | pts={len(prices)}")
