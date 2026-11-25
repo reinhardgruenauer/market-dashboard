@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="de">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Mega-Cap-Barometer — ES & NQ | RG Trading</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&family=JetBrains+Mono:wght@500;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/css/style.css?v=9">
+</head>
+<body>
+<div class="wrap">
+
+  <header>
+    <div class="brand">
+      <div class="logo">RG</div>
+      <div>
+        <h1>Mega-Cap-Barometer</h1>
+        <p>Wie stehen die 10 Schwergewichte – und was heißt das für NQ &amp; ES?</p>
+      </div>
+      <span class="badge" id="phaseBadge">Lade…</span>
+    </div>
+    <div class="controls">
+      <div class="seg mk" id="marketSeg">
+        <button data-m="nq" class="on">NQ-Sicht</button>
+        <button data-m="es">ES-Sicht</button>
+      </div>
+      <button class="btn" id="refreshBtn">Aktualisieren</button>
+    </div>
+  </header>
+  <div class="errbar" id="errbar" hidden></div>
+  <div class="infobar" id="infobar" hidden></div>
+
+  <div class="grid-top">
+    <div class="card" id="cardNQ">
+      <h3>NQ-Barometer <span class="mono small" id="nqWsum"></span></h3>
+      <div class="gauge-wrap">
+        <svg viewBox="-14 0 268 140" class="gauge" id="gNQ"></svg>
+        <div class="gauge-val mono" id="vNQ">–</div>
+        <div class="gauge-lab" id="lNQ">Lade…</div>
+        <div class="gauge-sub" id="sNQ"></div>
+      </div>
+    </div>
+    <div class="card" id="cardES">
+      <h3>ES-Barometer <span class="mono small" id="esWsum"></span></h3>
+      <div class="gauge-wrap">
+        <svg viewBox="-14 0 268 140" class="gauge" id="gES"></svg>
+        <div class="gauge-val mono" id="vES">–</div>
+        <div class="gauge-lab" id="lES">Lade…</div>
+        <div class="gauge-sub" id="sES"></div>
+      </div>
+    </div>
+    <div class="card ctxcard">
+      <h3>Kontext <span id="stamp" class="mono small"></span></h3>
+      <div class="ctx" id="ctx"></div>
+      <div class="breadth">
+        <div class="row"><span>Breite: im Plus</span><b id="bUp">–</b></div>
+        <div class="bar"><span id="bUpBar"></span></div>
+        <div class="row" style="margin-top:9px"><span id="refLabel">Über Referenz</span><b id="bRef">–</b></div>
+        <div class="bar"><span id="bRefBar"></span></div>
+      </div>
+    </div>
+  </div>
+
+  <div class="card cal">
+    <h3>Wirtschaftskalender heute <span class="small" style="text-transform:none;letter-spacing:0">nur hohe Relevanz · Uhrzeit MEZ</span></h3>
+    <div id="calendar"></div>
+  </div>
+
+  <div class="section-h">
+    <div>
+      <h2 id="tilesH">Die 10 Schwergewichte</h2>
+      <p>Kachel anklicken für Chart und Nachrichten. <span id="wInfo"></span></p>
+    </div>
+    <div class="seg" id="sortSeg">
+      <button data-o="w" class="on">Nach Gewicht</button>
+      <button data-o="c">Nach Veränderung</button>
+      <button data-o="i">Nach Einfluss</button>
+    </div>
+  </div>
+  <div class="tiles" id="tiles"></div>
+
+  <div class="grid-bot">
+    <div class="card detail">
+      <h3><span id="dTitle">Detail</span> <span class="mono small" id="dInfo"></span></h3>
+      <svg id="dChart" viewBox="0 0 600 230" preserveAspectRatio="none"></svg>
+      <div class="legend" id="dLegend"></div>
+      <div class="news" id="dNews"></div>
+    </div>
+    <div class="card contrib">
+      <h3><span id="conH">Wer zieht den NQ?</span> <span class="small" style="text-transform:none;letter-spacing:0">Gewicht × Veränderung</span></h3>
+      <div id="contrib"></div>
+      <p class="hint">Rechts = schiebt den Index nach oben, links = drückt ihn nach unten. Angabe in ungefähren Indexpunkten.</p>
+    </div>
+  </div>
+
+  <div class="card explain">
+    <h4>So wird das Barometer berechnet</h4>
+    <ol>
+      <li><b>Gewichtete Veränderung (70 %):</b> Jede Aktie zählt mit ihrem Indexgewicht. ±2 % gewichtete Veränderung zum Vortagesschluss entspricht dem Vollausschlag von ±100.</li>
+      <li><b>Lage zur Referenz (30 %):</b> Vorbörslich zählt, ob die Aktie über dem Vortagesschluss liegt, im US-Handel, ob sie über ihrem Tages-VWAP liegt – ebenfalls gewichtet. Unverändert zählt neutral.</li>
+      <li><b>Vor 10:00 MEZ (Europa-Session):</b> US-Aktien haben noch keine neuen Kurse. Dann zeigt das Barometer die letzte US-Sitzung inklusive Nachbörse – die NQ- und ES-Futures oben sind dagegen live.</li>
+      <li><b>NQ und ES getrennt:</b> Der NQ-Tacho nutzt die Top 10 im Nasdaq 100, der ES-Tacho die Top 10 im S&amp;P 500, jeweils mit eigenen Gewichten.</li>
+      <li><b>Einstufung:</b> unter −50 stark bärisch · −50 bis −15 bärisch · −15 bis +15 neutral · +15 bis +50 bullisch · über +50 stark bullisch.</li>
+    </ol>
+    <div class="note"><b>Wichtig:</b> Das Barometer beschreibt, wie die Schwergewichte <i>gerade</i> stehen – es ist keine Prognose und kein Einstiegssignal. Nutze es wie den VIX: als Kontext neben ES-Struktur, Location und Setup. Kurse von Yahoo Finance, teils verzögert.</div>
+  </div>
+
+  <footer>RG Trading · Lernwerkzeug · keine Anlage- oder Handelsempfehlung · Daten: Yahoo Finance (verzögert), Kalender: Forex Factory, News: Google News</footer>
+</div>
+<script src="/static/js/app.js?v=9"></script>
+</body>
+</html>
